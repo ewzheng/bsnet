@@ -1,5 +1,7 @@
 #Claude
 .claude
+.pytest_cache/
+__pycache__/
 
 # Gradle files
 .gradle/
