@@ -67,9 +67,9 @@ class Renderer:
         prompt = (
             f"Claim: \"{claim}\"\n"
             f"Rating: {label}\n"
-            f"Evidence: {evidence}\n\n"
-            f"Write a 1-2 sentence explanation of this rating. "
-            f"Only cite the evidence provided. Do not add outside knowledge."
+            f"Evidence: \"{evidence}\"\n\n"
+            f"Complete this sentence using only facts from above:\n"
+            f"This claim is rated {label} because"
         )
         return generate_llm(
             self._model,

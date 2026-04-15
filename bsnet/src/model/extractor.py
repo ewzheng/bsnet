@@ -69,15 +69,15 @@ class Extractor:
         """
         raw_claims = generate_llm(
             self._model,
-            "List each factual claim from this text as a complete "
-            "sentence, one per line. Only include facts that could be "
-            "checked against a source. Say \"none\" if there are no "
-            f"factual claims.\n\n{text}",
+            "Extract each checkable fact from this text. Write each as "
+            "a full sentence with its subject, one per line. Do not "
+            "write sentence fragments or bare numbers. Exclude opinions. "
+            f"Say \"none\" if there are no facts.\n\n{text}",
             thinking=True,
             max_tokens=256,
             temperature=0.3,
         )
-        if not raw_claims.strip() or "none" in raw_claims.strip().lower():
+        if not raw_claims.strip() or raw_claims.strip().lower() == "none":
             return []
 
         claims: list[Claim] = []
@@ -87,8 +87,8 @@ class Extractor:
                 continue
             query = generate_llm(
                 self._model,
-                "What keywords should I search to verify this claim? "
-                f"Reply with only the keywords.\n\n{claim_text}",
+                "Topic and keywords for this claim, comma-separated."
+                f"\n\n{claim_text}",
                 thinking=False,
                 max_tokens=64,
                 temperature=0.0,

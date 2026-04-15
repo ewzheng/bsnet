@@ -4,9 +4,9 @@ channels:
   - pytorch
   - defaults
 dependencies:
-  - python=3.11
-  - pytorch
-  - cpuonly
+  - python>=3.11
+  - pytorch::pytorch
+  - pytorch::torchaudio
   - numpy
   - pip
   - pip:
@@ -15,6 +15,5 @@ dependencies:
       - faster-whisper
       - sentencepiece
       - tiktoken
-      - pyaudio
       - webrtcvad-wheels
       - pytest

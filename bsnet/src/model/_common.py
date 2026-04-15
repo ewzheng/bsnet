@@ -24,7 +24,11 @@ SCORER_MODEL = "cross-encoder/nli-deberta-v3-base"
 RENDERER_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 RENDERER_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
 
-# ── Qwen3.5 recommended sampling parameters ─────────────────────────────────
+# ── Sampling parameters ──────────────────────────────────────────────────────
+# Two profiles: thinking mode (lower presence penalty, lets the model
+# reason longer) and non-thinking (higher presence penalty to keep
+# output concise). Models that don't produce <think> tags simply get
+# the non-thinking profile regardless of the flag.
 SAMPLING_THINKING = {
     "temperature": 1.0,
     "top_p": 0.95,
@@ -161,18 +165,20 @@ def generate_llm(
 ) -> str:
     """Run a chat completion on a GGUF model.
 
-    Applies the recommended Qwen3.5 sampling parameters based on
-    whether thinking mode is enabled. Any additional kwargs override
-    the defaults.
+    Uses generic sampling defaults that work across model families.
+    Any additional kwargs override the defaults (e.g. temperature).
+    If the model produces ``<think>`` blocks they are stripped
+    automatically.
 
     Args:
         model: A loaded ``Llama`` instance.
         prompt: The user message to send.
-        thinking: If ``True``, uses thinking-mode sampling and allows
-            the model to reason in ``<think>`` tags before responding.
-            The thinking content is stripped from the returned output.
+        thinking: Hint that the prompt benefits from chain-of-thought.
+            Models that support ``<think>`` tags (e.g. Qwen) will use
+            them; others will simply reason inline. The flag does not
+            change sampling — use kwargs for that.
         max_tokens: Upper bound on generated tokens.
-        **kwargs: Additional sampling overrides.
+        **kwargs: Sampling overrides (temperature, top_p, etc.).
 
     Returns:
         The model's response text with any thinking blocks removed.
@@ -185,19 +191,18 @@ def generate_llm(
         - Returned string contains no ``<think>`` tags.
         - Does not mutate the model.
     """
-    defaults = dict(SAMPLING_THINKING if thinking else SAMPLING_NON_THINKING)
-    defaults.update(kwargs)
+    params = dict(SAMPLING_THINKING if thinking else SAMPLING_NON_THINKING)
+    params.update(kwargs)
 
     messages = [{"role": "user", "content": prompt}]
 
     result = model.create_chat_completion(
         messages=messages,
         max_tokens=max_tokens,
-        **defaults,
+        **params,
     )
 
     text = result["choices"][0]["message"]["content"]
-    # Strip thinking blocks if present
     text = _THINK_RE.sub("", text).strip()
     return text
 
