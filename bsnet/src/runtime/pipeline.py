@@ -6,41 +6,11 @@ are exposed separately so the orchestrator can insert validation
 or other logic between them.
 """
 
-from dataclasses import dataclass
-
 from bsnet.src.model._common import label_claim
 from bsnet.src.model.extractor import Extractor
 from bsnet.src.model.renderer import Renderer
 from bsnet.src.model.scorer import Scorer
-from bsnet.src.utils.outputs import Claim, ScoredClaim
-
-
-@dataclass
-class CheckResult:
-    """Output of the scoring and labeling stage.
-
-    Produced by ``Pipeline.check()``. Contains the label and
-    evidence but no explanation yet — that comes from ``render()``.
-    """
-
-    claim: str
-    label: str
-    evidence: str
-    scored: ScoredClaim
-
-
-@dataclass
-class Verdict:
-    """Final output of the fact-checking pipeline for a single claim.
-
-    Produced by ``Pipeline.render()`` after validation has passed.
-    Contains everything the UI needs to display a fact-check result.
-    """
-
-    claim: str
-    label: str
-    evidence: str
-    explanation: str
+from bsnet.src.utils.outputs import CheckResult, Claim, Verdict
 
 
 class Pipeline:
