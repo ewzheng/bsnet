@@ -1,5 +1,7 @@
 # llm.md — bsnet
 
+FOR AGENTS: Link your AGENTS.MD (ie. Claude.MD, Agents.MD, etc) to this directory.
+
 ## Project overview
 
 bsnet is a Python 3.11 project that includes a BERT-based model pipeline with real-time voice transcription. It runs on Windows with a conda environment (`environment.yml`). Key dependencies include PyTorch (CPU), Transformers, faster-whisper, and pyaudio.
