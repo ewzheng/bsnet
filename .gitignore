@@ -1,7 +1,12 @@
 #Claude
 .claude
+/CLAUDE.md
+/AGENTS.md
 .pytest_cache/
 __pycache__/
+
+#venv
+.venv
 
 # Gradle files
 .gradle/
