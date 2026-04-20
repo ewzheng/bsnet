@@ -40,26 +40,24 @@ class Pipeline:
         self._scorer = Scorer()
         self._renderer = Renderer()
 
-    def extract(self, text: str) -> list[Claim]:
-        """Extract checkable claims from transcript text.
-
-        The orchestrator calls this first, then sends the queries
-        to the search API.
+    def extract(self, sentence: str) -> list[Claim]:
+        """Extract checkable claims from a transcript sentence.
 
         Args:
-            text: Raw transcript text, optionally with context
-                prepended by the orchestrator.
+            sentence: The current transcript sentence to extract
+                claims from.
 
         Returns:
             A list of ``Claim`` objects with text and search queries.
+            Empty when no checkable claims are found.
 
         Preconditions:
-            - ``text`` is a non-empty string.
+            - ``sentence`` is a non-empty string.
 
         Postconditions:
             - Each returned ``Claim`` has at least one query string.
         """
-        return self._extractor.extract(text)
+        return self._extractor.extract(sentence)
 
     def check(self, claim: str, snippets: list[str]) -> CheckResult | None:
         """Score a claim against search results and assign a label.

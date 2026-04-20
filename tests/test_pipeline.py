@@ -9,7 +9,9 @@ import time
 
 import pytest
 
+from bsnet.src.runtime.orchestrator import Orchestrator
 from bsnet.src.runtime.pipeline import Pipeline
+from bsnet.src.utils.outputs import CheckResult
 
 
 @pytest.fixture(scope="module")
@@ -115,6 +117,65 @@ def test_extract_then_check_flow(pipe: Pipeline) -> None:
     verdict = pipe.render(result)
     print(f"  explanation: {verdict.explanation}")
     assert verdict.explanation.strip()
+
+
+# ── Orchestrator end-to-end with the real pipeline ───────────────────────────
+
+
+def test_orchestrator_end_to_end_with_real_pipeline(pipe: Pipeline) -> None:
+    """Drive the real pipeline through the orchestrator with dummy inputs.
+
+    Uses a plain string iterator in place of the transcription stream
+    and canned search snippets in place of the search backend. Validates
+    that all stages wire up correctly and at least one verdict lands
+    with the expected content.
+
+    Preconditions:
+        - The ``pipe`` fixture is loaded.
+
+    Postconditions:
+        - At least one verdict is produced with non-empty fields.
+    """
+
+    def canned_search(queries: list[str]) -> list[str]:
+        """Return a single corroborating snippet regardless of queries."""
+        del queries
+        return [
+            "The Bureau of Labor Statistics reported that unemployment "
+            "fell to 3.4% in January 2023, the lowest level since 1969.",
+        ]
+
+    def pass_validate(result: CheckResult) -> bool:
+        """Accept every result through the validate stage."""
+        del result
+        return True
+
+    orch = Orchestrator(
+        pipeline=pipe,
+        search_fn=canned_search,
+        validate_fn=pass_validate,
+    )
+
+    chunks = ["The unemployment rate dropped to 3.4% in January 2023."]
+
+    t0 = time.perf_counter()
+    verdicts = list(orch.run(iter(chunks)))
+    elapsed = time.perf_counter() - t0
+
+    print(f"\n--- orchestrator end-to-end (real pipeline) ---")
+    print(f"  time:     {elapsed:.2f}s")
+    print(f"  verdicts: {len(verdicts)}")
+    for v in verdicts:
+        print(f"    [{v.label}] {v.claim}")
+        print(f"      evidence:    {v.evidence[:80]}")
+        print(f"      explanation: {v.explanation}")
+
+    assert len(verdicts) >= 1
+    for v in verdicts:
+        assert v.claim.strip()
+        assert v.label.strip()
+        assert v.evidence.strip()
+        assert v.explanation.strip()
 
 
 # ── Latency benchmarks ───────────────────────────────────────────────────────

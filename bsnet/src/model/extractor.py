@@ -70,20 +70,22 @@ class Extractor:
         raw_claims = generate_llm(
             self._model,
             "Extract each checkable fact from this text. Write each as "
-            "a full sentence with its subject, one per line. Do not "
-            "write sentence fragments or bare numbers. Exclude opinions. "
-            f"Say \"none\" if there are no facts.\n\n{text}",
+            "a full sentence with its subject explicitly named, one per "
+            "line. Do not write fragments or bare numbers. Exclude "
+            "opinions. Say \"none\" if there are no facts.\n\n"
+            f"{text}",
             thinking=True,
             max_tokens=256,
             temperature=0.3,
         )
-        if not raw_claims.strip() or raw_claims.strip().lower() == "none":
+        body = raw_claims.strip()
+        if not body or body.lower() == "none":
             return []
 
         claims: list[Claim] = []
-        for claim_text in raw_claims.strip().splitlines():
+        for claim_text in body.splitlines():
             claim_text = claim_text.strip().lstrip("0123456789.-) ")
-            if not claim_text:
+            if not claim_text or claim_text.lower() == "none":
                 continue
             query = generate_llm(
                 self._model,
