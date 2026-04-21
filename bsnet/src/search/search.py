@@ -35,7 +35,8 @@ def get_search_snippets(query: str, num_results: int = 5) -> list[str]:
         - Does not mutate any external state.
         - Each returned string is non-empty.
     """
-    results = DDGS().text(query, max_results=num_results)
+    fact_query = f"fact check {query}"
+    results = DDGS().text(fact_query, max_results=num_results)
 
     snippets: list[str] = [
         result.get("body", "").strip()
