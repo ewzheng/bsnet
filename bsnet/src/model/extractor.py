@@ -1,8 +1,9 @@
 """Claim extractor powered by Qwen3.5 via llama-cpp-python.
 
-Two-pass extraction: the first call pulls factual claims from a
-sentence, the second generates search keywords for each claim.
-Uses thinking mode for deeper reasoning about claim identification.
+Single-pass extraction: pulls factual claims from a sentence and
+leaves search-query assembly to the orchestrator (which sends the
+claim text directly to the search backend). Uses thinking mode for
+deeper reasoning about claim identification.
 """
 
 from bsnet.src.model._common import (
@@ -44,16 +45,17 @@ class Extractor:
         self._model = load_llm(repo, gguf_file, n_ctx=n_ctx)
 
     def extract(self, text: str) -> list[Claim]:
-        """Run two-pass extraction on an input string.
+        """Run single-pass claim extraction on an input string.
 
-        Pass 1 (thinking mode) asks the model to identify factual
-        claims in the text. Pass 2 generates search keywords for each
-        claim. If pass 1 returns nothing, the sentence has no
-        checkworthy claims and an empty list is returned.
+        Asks the model (in thinking mode) to identify factual claims
+        in the text and emit one per line. Returns a ``Claim`` per
+        emitted line; the downstream search layer uses the claim text
+        itself as the search query, which is both faster (no second
+        LLM call) and more reliable (key specifics like numbers and
+        dates can't be dropped by a flaky keyword-generation pass).
 
         Args:
-            text: The fully formatted input string, assembled by the
-                orchestrator (may include topic, context, and sentence).
+            text: The fully formatted input string.
 
         Returns:
             A list of ``Claim`` objects. Empty if no factual claims
@@ -65,15 +67,16 @@ class Extractor:
 
         Postconditions:
             - Does not mutate the model or input.
-            - Each returned ``Claim`` has at least one query string.
+            - Each returned ``Claim`` has a non-empty ``text``.
         """
         raw_claims = generate_llm(
             self._model,
             "Extract each checkable fact from this text. Write each as "
             "a full sentence with its subject explicitly named, one per "
-            "line. Do not write fragments or bare numbers. Exclude "
-            "opinions. Say \"none\" if there are no facts.\n\n"
-            f"{text}",
+            "line. If one sentence combines multiple facts, split it "
+            "into separate lines. Do not write fragments or bare "
+            "numbers. Exclude opinions. Say \"none\" if there are no "
+            f"facts.\n\n{text}",
             thinking=True,
             max_tokens=256,
             temperature=0.3,
@@ -87,17 +90,6 @@ class Extractor:
             claim_text = claim_text.strip().lstrip("0123456789.-) ")
             if not claim_text or claim_text.lower() == "none":
                 continue
-            query = generate_llm(
-                self._model,
-                "Topic and keywords for this claim, comma-separated."
-                f"\n\n{claim_text}",
-                thinking=False,
-                max_tokens=64,
-                temperature=0.0,
-            )
-            query = query.strip()
-            if not query:
-                continue
-            claims.append(Claim(text=claim_text, queries=[query]))
+            claims.append(Claim(text=claim_text))
 
         return claims

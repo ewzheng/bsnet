@@ -12,6 +12,7 @@ import pytest
 from bsnet.src.runtime.orchestrator import Orchestrator
 from bsnet.src.runtime.pipeline import Pipeline
 from bsnet.src.utils.outputs import CheckResult
+from bsnet.src.utils.search import get_search_snippets
 
 
 @pytest.fixture(scope="module")
@@ -64,8 +65,8 @@ def test_contradicted_claim_produces_false(pipe: Pipeline) -> None:
     assert verdict.explanation.strip()
 
 
-def test_opinion_returns_none(pipe: Pipeline) -> None:
-    """Opinion claims should be filtered out by the scorer/labeler."""
+def test_opinion_is_flagged_as_opinion_label(pipe: Pipeline) -> None:
+    """Opinion claims should carry the ``opinion`` label for downstream surfacing."""
     result = pipe.check(
         claim="I believe we need to do better as a country.",
         snippets=[
@@ -74,21 +75,26 @@ def test_opinion_returns_none(pipe: Pipeline) -> None:
         ],
     )
     print(f"\n--- opinion claim ---")
-    print(f"  result: {result}")
+    print(f"  label: {result.label}")
 
-    assert result is None
+    assert result is not None
+    assert result.label == "opinion"
 
 
-def test_empty_snippets_returns_none(pipe: Pipeline) -> None:
-    """No evidence should return None."""
+def test_empty_snippets_is_flagged_as_no_evidence(pipe: Pipeline) -> None:
+    """Empty search results should produce a ``no-evidence`` ``CheckResult``."""
     result = pipe.check(
         claim="GDP grew 2.1% last quarter.",
         snippets=[],
     )
     print(f"\n--- no evidence ---")
-    print(f"  result: {result}")
+    print(f"  label: {result.label}")
+    print(f"  evidence: {result.evidence!r}")
 
-    assert result is None
+    assert result is not None
+    assert result.label == "no-evidence"
+    assert result.evidence == ""
+    assert result.scored.scores == []
 
 
 def test_extract_then_check_flow(pipe: Pipeline) -> None:
@@ -137,9 +143,9 @@ def test_orchestrator_end_to_end_with_real_pipeline(pipe: Pipeline) -> None:
         - At least one verdict is produced with non-empty fields.
     """
 
-    def canned_search(queries: list[str]) -> list[str]:
-        """Return a single corroborating snippet regardless of queries."""
-        del queries
+    def canned_search(query: str) -> list[str]:
+        """Return a single corroborating snippet regardless of query."""
+        del query
         return [
             "The Bureau of Labor Statistics reported that unemployment "
             "fell to 3.4% in January 2023, the lowest level since 1969.",
@@ -171,6 +177,58 @@ def test_orchestrator_end_to_end_with_real_pipeline(pipe: Pipeline) -> None:
         print(f"      explanation: {v.explanation}")
 
     assert len(verdicts) >= 1
+    for v in verdicts:
+        assert v.claim.strip()
+        assert v.label.strip()
+        assert v.evidence.strip()
+        assert v.explanation.strip()
+
+
+def test_orchestrator_end_to_end_with_real_search(pipe: Pipeline) -> None:
+    """Exercise the whole stack — real pipeline and real DDGS search.
+
+    Mirrors the wiring ``main()`` uses when driven by ``listen()``:
+    the real ``Pipeline``, ``get_search_snippets`` passed directly
+    as the search callable, and the default pass-through validator.
+    Feeds a single fake chunk in place of the transcription stream
+    so we can measure end-to-end latency with the network call in
+    the loop.
+
+    Requires a live network connection. Fails loudly if DuckDuckGo
+    returns nothing usable, which is a valid signal that the search
+    integration has regressed.
+
+    Preconditions:
+        - The ``pipe`` fixture is loaded.
+        - Network access to duckduckgo.com is available.
+
+    Postconditions:
+        - At least one verdict is produced with non-empty fields.
+        - End-to-end latency is printed for manual inspection.
+    """
+    orch = Orchestrator(
+        pipeline=pipe,
+        search_fn=get_search_snippets,
+    )
+
+    chunks = ["The unemployment rate dropped to 3.4% in January 2023."]
+
+    t0 = time.perf_counter()
+    verdicts = list(orch.run(iter(chunks)))
+    elapsed = time.perf_counter() - t0
+
+    print(f"\n--- orchestrator end-to-end (real pipeline + real search) ---")
+    print(f"  time:     {elapsed:.2f}s")
+    print(f"  verdicts: {len(verdicts)}")
+    for v in verdicts:
+        print(f"    [{v.label}] {v.claim}")
+        print(f"      evidence:    {v.evidence[:80]}")
+        print(f"      explanation: {v.explanation}")
+
+    assert len(verdicts) >= 1, (
+        "expected at least one verdict from the full stack — check "
+        "network connectivity and DuckDuckGo availability"
+    )
     for v in verdicts:
         assert v.claim.strip()
         assert v.label.strip()

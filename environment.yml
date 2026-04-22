@@ -17,3 +17,4 @@ dependencies:
       - tiktoken
       - webrtcvad-wheels
       - pytest
+      - ddgs

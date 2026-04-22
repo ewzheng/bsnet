@@ -32,34 +32,36 @@ from bsnet.src.runtime.pipeline import Pipeline
 from bsnet.src.utils.buffer import DEFAULT_CONTEXT_SENTENCES, TranscriptBuffer
 from bsnet.src.utils.outputs import CheckResult, Claim, Verdict
 
-SearchFn = Callable[[list[str]], list[str]]
+SearchFn = Callable[[str], list[str]]
 ValidateFn = Callable[[CheckResult], bool]
 
 
-def _default_search(queries: list[str]) -> list[str]:
-    """Placeholder search callable used until the real branch merges.
+def _default_search(query: str) -> list[str]:
+    """Placeholder search callable used until a real backend is wired up.
 
-    Returns one stub snippet per query so downstream stages have
-    something to operate on during end-to-end exercising of the
-    runtime. The real implementation will live in ``bsnet.src.runtime``
-    or wherever the search branch lands and should be injected into
-    ``Orchestrator`` via ``search_fn``.
+    Returns a single stub snippet so downstream stages have something
+    to operate on during end-to-end exercising of the runtime. The
+    real implementation lives in ``bsnet.src.utils.search`` and is
+    injected into ``Orchestrator`` via ``search_fn`` at the CLI entry
+    point.
 
     Args:
-        queries: Search query strings attached to a ``Claim``.
+        query: The search query string.
 
     Returns:
-        A list of placeholder snippet strings, one per non-empty query.
+        A list containing one placeholder snippet, or empty when
+        ``query`` is blank.
 
     Preconditions:
-        - ``queries`` is a list of strings.
+        - ``query`` is a string.
 
     Postconditions:
         - Does not perform any I/O.
-        - Returns an empty list only when every query is empty.
     """
-    # TODO: replace with real search integration once that branch lands.
-    return [f"placeholder evidence for query: {q}" for q in queries if q]
+    query = query.strip()
+    if not query:
+        return []
+    return [f"placeholder evidence for query: {query}"]
 
 
 def _default_validate(result: CheckResult) -> bool:
@@ -120,11 +122,11 @@ class Orchestrator:
                 fresh ``Pipeline()`` is constructed (which loads all
                 three models eagerly). Injecting an instance is useful
                 for tests and for sharing a warm pipeline across runs.
-            search_fn: External search callable taking the queries
-                attached to a ``Claim`` and returning evidence snippet
-                strings. When ``None``, the module-level placeholder is
-                used — sufficient to exercise the rest of the runtime
-                but not a real search backend.
+            search_fn: External search callable taking a claim's
+                query string and returning evidence snippet strings.
+                When ``None``, the module-level placeholder is used —
+                sufficient to exercise the rest of the runtime but not
+                a real search backend.
             validate_fn: External validation callable gating a scored
                 ``CheckResult`` before it reaches the renderer. When
                 ``None``, the module-level placeholder is used (passes
@@ -298,13 +300,16 @@ class Orchestrator:
     def _search_task(self, claim: Claim) -> None:
         """Run a single search call and enqueue snippets for scoring.
 
-        Exceptions are captured rather than propagated so one failing
-        search does not poison the pool. The shutdown handshake is
-        unaffected; missing snippets simply mean no ``CheckResult`` is
-        produced for that claim.
+        Passes the claim's full text directly as the search query —
+        specifics like numbers and dates survive verbatim, and no
+        second LLM call is needed to derive keywords. Exceptions are
+        captured rather than propagated so one failing search does not
+        poison the pool. The shutdown handshake is unaffected;
+        missing snippets simply mean no ``CheckResult`` is produced
+        for that claim.
 
         Args:
-            claim: The claim whose queries should be searched.
+            claim: The claim whose text should be searched.
 
         Preconditions:
             - Runs on a worker thread inside the search thread pool.
@@ -316,7 +321,7 @@ class Orchestrator:
               is enqueued.
         """
         try:
-            snippets = self._search_fn(claim.queries)
+            snippets = self._search_fn(claim.text)
             self._snippet_q.put((claim.text, snippets))
         except BaseException as exc:
             self._record_error(exc)
@@ -324,16 +329,16 @@ class Orchestrator:
     def _check_loop(self) -> None:
         """Score claims against retrieved snippets and forward results.
 
-        ``None`` results from the scorer (opinion claims, empty
-        snippets) are dropped so the validator only sees labeled
-        ``CheckResult`` objects.
+        ``Pipeline.check`` always returns a ``CheckResult`` — dropped
+        cases (empty search, opinion) are encoded via the ``label``
+        field rather than silently filtered, so the user still sees
+        what happened to every claim.
 
         Preconditions:
             - Invoked only from the check stage thread.
 
         Postconditions:
-            - Every non-``None`` scorer output has been enqueued onto
-              ``_check_q``.
+            - Every scored claim has been enqueued onto ``_check_q``.
             - Any exception has been captured via ``_record_error``.
             - Exactly one sentinel has been enqueued onto ``_check_q``.
         """
@@ -343,9 +348,7 @@ class Orchestrator:
                 if item is self._SENTINEL:
                     break
                 claim_text, snippets = item
-                result = self._pipeline.check(claim_text, snippets)
-                if result is not None:
-                    self._check_q.put(result)
+                self._check_q.put(self._pipeline.check(claim_text, snippets))
         except BaseException as exc:
             self._record_error(exc)
         finally:
@@ -355,14 +358,18 @@ class Orchestrator:
         """Gate scored results through ``validate_fn`` before rendering.
 
         Results for which ``validate_fn`` returns ``False`` are
-        dropped; accepted results are forwarded unchanged.
+        dropped; accepted results are forwarded unchanged. Dropped
+        labels (``"no-evidence"`` and ``"opinion"``) bypass the
+        validator entirely — they are already decided and the user
+        asked to surface them rather than let a validator silently
+        discard them.
 
         Preconditions:
             - Invoked only from the validate stage thread.
 
         Postconditions:
-            - Every accepted result has been enqueued onto
-              ``_result_q``.
+            - Every accepted or dropped-label result has been enqueued
+              onto ``_result_q``.
             - Any exception has been captured via ``_record_error``.
             - Exactly one sentinel has been enqueued onto
               ``_result_q``.
@@ -372,7 +379,9 @@ class Orchestrator:
                 item = self._check_q.get()
                 if item is self._SENTINEL:
                     break
-                if self._validate_fn(item):
+                if item.label in ("no-evidence", "opinion"):
+                    self._result_q.put(item)
+                elif self._validate_fn(item):
                     self._result_q.put(item)
         except BaseException as exc:
             self._record_error(exc)

@@ -8,9 +8,60 @@ no-op and exists to keep the smoke test independent of audio hardware
 and model weights.
 """
 
+import sys
 from collections.abc import Iterable
 
 from bsnet.src.runtime.orchestrator import Orchestrator
+from bsnet.src.utils.outputs import Verdict
+from bsnet.src.utils.search import get_search_snippets as search_fn
+
+_LABEL_EMOJI: dict[str, str] = {
+    "true": "✅",
+    "mostly true": "✅",
+    "partially true": "🟡",
+    "mixture": "⚖️",
+    "partially false": "🟠",
+    "mostly false": "❌",
+    "false": "❌",
+    "unproven": "❓",
+    "opinion": "💭",
+    "no-evidence": "⛔",
+}
+
+
+def _format_verdict(verdict: Verdict) -> str:
+    """Render a ``Verdict`` as a terminal-friendly block.
+
+    Builds a multi-line string with an emoji + uppercase-label header,
+    the claim on its own line, an optional evidence line when an
+    evidence quote is present, a blank line, and finally the
+    ``Pipeline.render`` output (which already carries the ``-----``
+    divider and aggregation summary for factual verdicts).
+
+    Args:
+        verdict: The verdict to render.
+
+    Returns:
+        A formatted multi-line string ready for ``print``.
+
+    Preconditions:
+        - ``verdict.label`` is a non-empty string.
+        - ``verdict.explanation`` is a non-empty string.
+
+    Postconditions:
+        - Does not mutate ``verdict``.
+        - Returned string contains no trailing newline.
+    """
+    emoji = _LABEL_EMOJI.get(verdict.label, "📄")
+    lines = [
+        f"{emoji} {verdict.label.upper()}",
+        f"Claim: {verdict.claim}",
+    ]
+    if verdict.evidence:
+        lines.append(f"Evidence: {verdict.evidence}")
+    lines.append("")
+    lines.append(verdict.explanation)
+    return "\n".join(lines)
 
 
 def main(chunk_source: Iterable[str] | None = None) -> int:
@@ -40,11 +91,19 @@ def main(chunk_source: Iterable[str] | None = None) -> int:
     if chunk_source is None:
         return 0
 
-    orch = Orchestrator()
+    # Windows terminals default to cp1252 which cannot encode emoji.
+    # Force UTF-8 on stdout and degrade unknown glyphs to "?" instead
+    # of letting the first emoji printed crash the whole session.
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    orch = Orchestrator(search_fn=search_fn)
     for verdict in orch.run(chunk_source):
-        print(f"[{verdict.label}] {verdict.claim}")
-        print(f"  evidence: {verdict.evidence}")
-        print(f"  explanation: {verdict.explanation}")
+        print(_format_verdict(verdict))
+        print()
     return 0
 
 

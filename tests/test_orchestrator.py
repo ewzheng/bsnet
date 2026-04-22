@@ -37,7 +37,7 @@ class FakePipeline:
     def __init__(
         self,
         extract_fn: Callable[[str], list[Claim]] | None = None,
-        check_fn: Callable[[str, list[str]], CheckResult | None] | None = None,
+        check_fn: Callable[[str, list[str]], CheckResult] | None = None,
         render_fn: Callable[[CheckResult], Verdict] | None = None,
     ) -> None:
         """Construct a fake pipeline with optional stage overrides.
@@ -77,12 +77,14 @@ class FakePipeline:
         self.extract_calls.append(sentence)
         if self._extract_fn is not None:
             return self._extract_fn(sentence)
-        return [Claim(text=f"claim:{sentence}", queries=[sentence])]
+        return [Claim(text=f"claim:{sentence}")]
 
-    def check(
-        self, claim: str, snippets: list[str],
-    ) -> CheckResult | None:
-        """Record the call and return a scored result or ``None``.
+    def check(self, claim: str, snippets: list[str]) -> CheckResult:
+        """Record the call and return a scored result.
+
+        Mirrors ``Pipeline.check``'s always-return-a-result contract:
+        empty snippets produce a ``"no-evidence"`` result rather than
+        ``None``.
 
         Preconditions:
             - ``claim`` is a string.
@@ -94,7 +96,12 @@ class FakePipeline:
         if self._check_fn is not None:
             return self._check_fn(claim, snippets)
         if not snippets:
-            return None
+            return CheckResult(
+                claim=claim,
+                label="no-evidence",
+                evidence="",
+                scored=ScoredClaim(claim=claim, scores=[]),
+            )
         evidence = snippets[0]
         return CheckResult(
             claim=claim,
@@ -128,16 +135,18 @@ class FakePipeline:
         )
 
 
-def _echo_search(queries: list[str]) -> list[str]:
-    """Return one snippet per non-empty query, echoing the query text.
+def _echo_search(query: str) -> list[str]:
+    """Return one snippet echoing the query text.
 
     Preconditions:
-        - ``queries`` is a list of strings.
+        - ``query`` is a string.
 
     Postconditions:
         - Does not perform any I/O.
     """
-    return [f"snippet for {q}" for q in queries if q]
+    if not query.strip():
+        return []
+    return [f"snippet for {query}"]
 
 
 def _pass_validate(_: CheckResult) -> bool:
@@ -179,7 +188,7 @@ def test_end_to_end_produces_verdict() -> None:
     v = verdicts[0]
     assert v.claim == "claim:The sky is blue."
     assert v.label == "true"
-    assert v.evidence == "snippet for The sky is blue."
+    assert v.evidence == "snippet for claim:The sky is blue."
     assert v.explanation == "explained:claim:The sky is blue."
 
 
@@ -253,6 +262,40 @@ def test_validate_false_drops_result_before_render() -> None:
     assert "claim:Bad one." not in rendered
 
 
+def test_no_evidence_surfaces_and_bypasses_validate_fn() -> None:
+    """Empty search should produce a ``no-evidence`` verdict that skips validate.
+
+    Preconditions:
+        - ``search_fn`` returns no snippets for every claim.
+        - ``validate_fn`` would reject every result if asked.
+
+    Postconditions:
+        - The claim still produces a verdict with label ``no-evidence``.
+        - ``validate_fn`` was never the gate (if it had been, nothing
+          would have reached the sink).
+    """
+
+    def empty_search(query: str) -> list[str]:
+        del query
+        return []
+
+    def reject_all(result: CheckResult) -> bool:
+        del result
+        return False
+
+    fake = FakePipeline()
+    orch = Orchestrator(
+        pipeline=fake,
+        search_fn=empty_search,
+        validate_fn=reject_all,
+    )
+
+    verdicts = list(orch.run(iter(["Something obscure."])))
+
+    assert len(verdicts) == 1
+    assert verdicts[0].label == "no-evidence"
+
+
 def test_search_stage_runs_in_parallel() -> None:
     """Slow search calls should overlap via the thread pool.
 
@@ -267,9 +310,9 @@ def test_search_stage_runs_in_parallel() -> None:
     """
     delay = 0.1
 
-    def slow_search(queries: list[str]) -> list[str]:
+    def slow_search(query: str) -> list[str]:
         time.sleep(delay)
-        return [f"snippet for {q}" for q in queries if q]
+        return [f"snippet for {query}"] if query.strip() else []
 
     fake = FakePipeline()
     orch = Orchestrator(

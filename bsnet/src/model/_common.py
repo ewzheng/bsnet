@@ -6,6 +6,7 @@ inference logic. Supports both HuggingFace transformers models
 and GGUF models via llama-cpp-python.
 """
 
+import os
 import re
 
 import torch
@@ -49,6 +50,14 @@ SAMPLING_NON_THINKING = {
 
 # Regex to strip <think>...</think> blocks from model output
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+# ── NLI aggregation thresholds ───────────────────────────────────────────────
+# Shared by ``label_claim`` (for labeling) and the pipeline's evidence
+# summary (for post-hoc display). Keep these in one place so tuning
+# the labeler automatically retunes the summary too.
+STRONG_SIGNAL = 0.9
+WEAK_SIGNAL = 0.3
+NEUTRAL_SIGNAL = 0.1
 
 
 def label_claim(scores: list) -> tuple[str, str]:
@@ -98,26 +107,26 @@ def label_claim(scores: list) -> tuple[str, str]:
         if s.contradict > max_contradict:
             max_contradict = s.contradict
 
-        if s.support > 0.9:
+        if s.support > STRONG_SIGNAL:
             n_strong_support += 1
-        if s.contradict > 0.9:
+        if s.contradict > STRONG_SIGNAL:
             n_strong_contradict += 1
 
-    if max_support < 0.1 and max_contradict < 0.1:
+    if max_support < NEUTRAL_SIGNAL and max_contradict < NEUTRAL_SIGNAL:
         return ("opinion", best_snippet)
-    if max_support < 0.3 and max_contradict < 0.3:
+    if max_support < WEAK_SIGNAL and max_contradict < WEAK_SIGNAL:
         return ("unproven", best_snippet)
 
     if n_strong_support > 0 and n_strong_contradict > 0:
         return ("mixture", best_snippet)
 
     if n_strong_support > 0 and n_strong_contradict == 0:
-        if max_contradict > 0.3:
+        if max_contradict > WEAK_SIGNAL:
             return ("mostly true", best_snippet)
         return ("true", best_snippet)
 
     if n_strong_contradict > 0 and n_strong_support == 0:
-        if max_support > 0.3:
+        if max_support > WEAK_SIGNAL:
             return ("mostly false", best_snippet)
         return ("false", best_snippet)
 
@@ -133,6 +142,12 @@ def load_llm(
 ) -> Llama:
     """Load a GGUF model via llama-cpp-python.
 
+    Reads ``BSNET_GPU_LAYERS`` from the environment to control GPU
+    offload. Set it to ``-1`` to offload every layer to GPU (requires
+    a CUDA / Metal / ROCm build of ``llama-cpp-python``), or a positive
+    integer to offload that many layers. Defaults to ``0`` (CPU only),
+    preserving the original behavior.
+
     Args:
         repo: HuggingFace repo ID containing the GGUF file.
         gguf_file: Name of the GGUF file within the repo.
@@ -144,14 +159,20 @@ def load_llm(
     Preconditions:
         - ``repo`` is a valid HuggingFace repo with GGUF files.
         - ``gguf_file`` exists in the repo.
+        - ``BSNET_GPU_LAYERS``, if set, is a valid integer.
 
     Postconditions:
         - The model is loaded and ready for chat completion calls.
+        - Layers are offloaded per ``BSNET_GPU_LAYERS`` when the
+          installed ``llama-cpp-python`` supports the target backend;
+          ignored on a CPU-only build.
     """
+    n_gpu_layers = int(os.environ.get("BSNET_GPU_LAYERS", "0"))
     return Llama.from_pretrained(
         repo,
         filename=gguf_file,
         n_ctx=n_ctx,
+        n_gpu_layers=n_gpu_layers,
         verbose=False,
     )
 
