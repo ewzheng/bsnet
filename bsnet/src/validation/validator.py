@@ -11,38 +11,28 @@ from typing import List, Literal
 from bsnet.src.utils.outputs import CheckResult, EvidenceScore, ScoredClaim
 
 
-Verdict = Literal["pass", "fail"]
-
-
 class Validator:
     """
     Heuristic evaluator for CheckResult objects.
     """
 
-    def evaluate_check_result(self, result: CheckResult) -> Verdict:
+    class Validator:
+    """
+    Heuristic evaluator for CheckResult objects.
+    """
+
+    def evaluate_check_result(self, result: CheckResult) -> bool:
         """
-        Evaluate a CheckResult and return "pass" or "fail".
-
-        This function applies a deterministic heuristic based on:
-        - strongest support vs contradiction
-        - number of supporting snippets
-        - aggregate support vs contradiction
-        - margin consistency across snippets
-        - weak influence from the pipeline label
-
-        Args:
-            result: CheckResult object from the pipeline
-
-        Returns:
-            "pass" if evidence supports the claim, otherwise "fail"
+        Evaluate a CheckResult and return True (pass) or False (fail).
         """
+
         if not result or not result.scored:
-            return "fail"
+            return False
 
-        scores: List[EvidenceScore] = result.scored.scores
+        scores: List[EvidenceScore] = result.scored.scores or []
 
         if not scores:
-            return "fail"
+            return False
 
         self._validate_scores(scores)
 
@@ -63,10 +53,10 @@ class Validator:
 
         # ---------- HARD FAIL CONDITIONS ----------
         if strongest_contradiction >= 0.90:
-            return "fail"
+            return False
 
         if contradiction_count >= 2 and total_contradiction > total_support:
-            return "fail"
+            return False
 
         # ---------- STRONG PASS CONDITIONS ----------
         if (
@@ -74,13 +64,13 @@ class Validator:
             and best_margin >= 0.25
             and strongest_contradiction < 0.70
         ):
-            return "pass"
+            return True
 
         if (
             strong_support_count >= 2
             and total_support > total_contradiction * 1.25
         ):
-            return "pass"
+            return True
 
         # ---------- AGGREGATE SCORING ----------
         aggregate_score = self._aggregate_score(
@@ -96,7 +86,7 @@ class Validator:
             snippet_count=len(metrics),
         )
 
-        return "pass" if aggregate_score >= 0.55 else "fail"
+        return aggregate_score >= 0.55
 
     # -----------------------------------------------------------------
     # Internal helpers
