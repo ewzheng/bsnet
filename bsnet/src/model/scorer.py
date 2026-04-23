@@ -20,10 +20,10 @@ class Scorer:
     """
 
     # Label indices for the NLI model output logits. MoritzLaurer's
-    # DeBERTa-v3-*-mnli-fever-anli-ling-wanli family orders its labels
-    # as entailment/neutral/contradiction; the older cross-encoder
-    # family used the reverse. Swapping the model requires swapping
-    # these constants.
+    # DeBERTa-v3-*-mnli-fever-anli-ling-wanli family orders its
+    # labels as entailment/neutral/contradiction; the SBERT
+    # cross-encoder/nli-* family uses contradiction/entailment/
+    # neutral. Swapping ``SCORER_MODEL`` requires swapping these.
     _LABEL_ENTAILMENT = 0
     _LABEL_NEUTRAL = 1
     _LABEL_CONTRADICTION = 2

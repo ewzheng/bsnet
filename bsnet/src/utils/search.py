@@ -5,16 +5,26 @@ search query string and returns raw text snippets aggregated from
 multiple free search backends for use as evidence in the scoring
 stage. Backends run in parallel; exceptions on any single backend
 are swallowed so one flaky engine cannot starve the pipeline.
+Snippets are additionally passed through a lightweight semantic
+relevance filter (MiniLM sentence embeddings + cosine similarity)
+to drop tangential hits before they reach the NLI scorer — smaller
+NLI models in particular are easily fooled by query-term-overlap
+snippets that full-text search surfaces but aren't actually about
+the claim's topic.
 """
 
 import json
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+import torch
+import torch.nn.functional as F
 from ddgs import DDGS
+from transformers import AutoModel, AutoTokenizer
 
 # Backend whitelist for the per-backend parallel search.
 #
@@ -59,6 +69,127 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # sentence of the body — where entailment signal is densest — while
 # keeping padded-batch cost roughly flat across snippets.
 _MAX_SNIPPET_CHARS = 200
+
+# Sentence-embedding model used by the post-retrieval relevance
+# filter. MiniLM-L6-v2 is ~22M params, ~80MB on disk, and hits
+# sub-100ms batched inference for 10 short snippets on CPU — small
+# enough to sit in the search stage without touching the pipeline
+# bottleneck. Any drop-in replacement must produce L2-normalized
+# 384-d embeddings of (query, snippets) so cosine comes out as dot
+# product.
+_EMBEDDER_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+# Adaptive threshold: keep snippets whose cosine similarity to the
+# claim is within ``_RELEVANCE_BAND`` of the top-scoring snippet.
+# Using a band rather than an absolute threshold makes the filter
+# robust across different claim types — a highly-covered claim
+# where all snippets score ~0.7 keeps them all, while a sparse
+# claim where only one snippet scores 0.5 and the rest 0.15 drops
+# the tangential hits.
+_RELEVANCE_BAND = 0.20
+
+# Never drop below this fraction of input snippets even if the
+# band filter would. Prevents catastrophic pruning on claims the
+# embedder has low confidence on.
+_RELEVANCE_MIN_KEEP_FRAC = 0.5
+
+# Lazy module-level singleton. Loading the MiniLM weights takes
+# ~1s; we amortize it across every search call.
+_embedder_lock = threading.Lock()
+_embedder_tokenizer: AutoTokenizer | None = None
+_embedder_model: AutoModel | None = None
+
+
+def _get_embedder() -> tuple[AutoTokenizer, AutoModel]:
+    """Return the shared embedder tokenizer + model, loading lazily.
+
+    Postconditions:
+        - Both objects are in eval mode after the first call.
+        - Subsequent calls return the cached instances.
+    """
+    global _embedder_tokenizer, _embedder_model
+    if _embedder_model is not None:
+        return _embedder_tokenizer, _embedder_model
+    with _embedder_lock:
+        if _embedder_model is None:
+            tok = AutoTokenizer.from_pretrained(_EMBEDDER_MODEL)
+            mdl = AutoModel.from_pretrained(_EMBEDDER_MODEL)
+            mdl.eval()
+            _embedder_tokenizer = tok
+            _embedder_model = mdl
+    return _embedder_tokenizer, _embedder_model
+
+
+def _embed(texts: list[str]) -> torch.Tensor:
+    """Encode texts into L2-normalized mean-pooled sentence embeddings.
+
+    Args:
+        texts: Non-empty list of strings to encode.
+
+    Returns:
+        A ``(N, 384)`` float tensor where each row is the unit-norm
+        embedding of the corresponding input.
+
+    Preconditions:
+        - ``texts`` is non-empty.
+
+    Postconditions:
+        - Each returned row has L2 norm ≈ 1.
+        - Does not mutate the loaded model.
+    """
+    tokenizer, model = _get_embedder()
+    batch = tokenizer(
+        texts, padding=True, truncation=True, return_tensors="pt",
+    )
+    with torch.no_grad():
+        out = model(**batch)
+    token_embeds = out.last_hidden_state
+    mask = batch["attention_mask"].unsqueeze(-1).float()
+    pooled = (token_embeds * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+    return F.normalize(pooled, p=2, dim=1)
+
+
+def _relevance_filter(query: str, snippets: list[str]) -> list[str]:
+    """Drop snippets that look tangential to the query.
+
+    Uses MiniLM sentence embeddings to compute cosine similarity
+    between the claim and each snippet, keeping only those within
+    ``_RELEVANCE_BAND`` of the top-scoring snippet. The filter is
+    conservative: it never drops below ``_RELEVANCE_MIN_KEEP_FRAC``
+    of the input, and when ≤2 snippets are provided it passes them
+    through unchanged (too little signal to filter reliably).
+
+    Args:
+        query: The claim text.
+        snippets: Post-dedup snippets from the aggregator.
+
+    Returns:
+        A filtered list of snippets, in the same order as the input.
+
+    Preconditions:
+        - ``query`` is a non-empty string.
+        - Each snippet is a non-empty string.
+
+    Postconditions:
+        - Returned list preserves input order.
+        - Returned list is a subset of ``snippets``.
+        - ``len(result) >= max(ceil(len(snippets) * MIN_KEEP_FRAC), 1)``.
+    """
+    if len(snippets) <= 2:
+        return snippets
+    embeds = _embed([query] + snippets)
+    claim_emb = embeds[0:1]
+    snippet_embs = embeds[1:]
+    sims = (snippet_embs @ claim_emb.T).squeeze(-1).tolist()
+    top = max(sims)
+    cutoff = top - _RELEVANCE_BAND
+    kept = [s for s, sim in zip(snippets, sims) if sim >= cutoff]
+    min_keep = max(int(len(snippets) * _RELEVANCE_MIN_KEEP_FRAC), 1)
+    if len(kept) < min_keep:
+        ranked = sorted(zip(snippets, sims), key=lambda x: -x[1])
+        kept_set = {s for s, _ in ranked[:min_keep]}
+        kept = [s for s in snippets if s in kept_set]
+    return kept
 
 
 def get_search_snippets(
@@ -202,4 +333,4 @@ def get_search_snippets(
                     seen.add(body)
                     snippets.append(body)
 
-    return snippets
+    return _relevance_filter(query, snippets)
