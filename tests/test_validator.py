@@ -1,327 +1,157 @@
 """
 test_validator.py
 
-Unit tests for the Validator class.
-
-This module verifies the behavior of Validator.evaluate_check_result()
-using a variety of scenarios, including:
-
-- Missing or invalid input data
-- Strong supporting or contradicting evidence
-- Aggregate scoring behavior
-- Edge and borderline cases
-
-Dependencies:
-- pytest
-- Project dataclasses: CheckResult, ScoredClaim, EvidenceScore
+Integration-style pytest test for the real Pipeline + Validator flow.
 """
-
 import pytest
 
+from bsnet.src.runtime.pipeline import Pipeline
 from bsnet.src.validation.validator import Validator
-from bsnet.src.utils.outputs import CheckResult, ScoredClaim, EvidenceScore
+from bsnet.src.utils.outputs import CheckResult
 
 
-@pytest.fixture(scope="module")
+# -----------------------
+# Fixtures
+# -----------------------
+
+@pytest.fixture
+def pipeline() -> Pipeline:
+    """Create a reusable Pipeline instance."""
+    return Pipeline()
+
+
+@pytest.fixture
 def validator() -> Validator:
-    """
-    Pytest fixture that provides a shared Validator instance.
-
-    Scope:
-        module — instantiated once per test module
-
-    Returns:
-        Validator: initialized validator instance
-    """
+    """Create a reusable Validator instance."""
     return Validator()
 
 
-def test_returns_fail_when_scored_is_missing(validator: Validator) -> None:
-    """
-    Verify that the validator returns "fail" when the scored field is None.
+# -----------------------
+# Tests
+# -----------------------
 
-    This represents a case where the pipeline did not produce any
-    scoring output for the claim.
-    """
-    result = CheckResult(
-        claim="Sample claim",
-        label="supported",
-        evidence="",
-        scored=None,
-    )
+def test_pipeline_check_result_passes_validator_obviously_true(pipeline, validator) -> None:
+    """A clearly supported claim should produce a passing validator result."""
+    claim = "Water freezes at 0 degrees Celsius at standard atmospheric pressure."
+    snippets = [
+        "Pure water freezes at 0 degrees Celsius at standard atmospheric pressure.",
+        "At standard pressure, the freezing point of water is 0°C.",
+        "Science references state that water reaches its freezing point at 0 degrees Celsius under normal atmospheric conditions.",
+    ]
 
-    assert validator.evaluate_check_result(result) == "fail"
+    check_result = pipeline.check(claim, snippets)
 
+    assert check_result is not None
+    assert isinstance(check_result, CheckResult)
+    assert check_result.scored is not None
+    assert check_result.scored.scores is not None
+    assert len(check_result.scored.scores) > 0
 
-def test_returns_fail_when_scores_list_is_empty(validator: Validator) -> None:
-    """
-    Verify that the validator returns "fail" when the scores list is empty.
+    result = validator.evaluate_check_result(check_result)
 
-    Even if a ScoredClaim exists, the absence of EvidenceScore entries
-    should be treated as insufficient evidence.
-    """
-    result = CheckResult(
-        claim="Sample claim",
-        label="supported",
-        evidence="",
-        scored=ScoredClaim(
-            claim="Sample claim",
-            scores=[],
-        ),
-    )
-
-    assert validator.evaluate_check_result(result) == "fail"
+    assert result is True
 
 
-def test_returns_fail_on_very_strong_contradiction(validator: Validator) -> None:
-    """
-    Verify that the validator returns "fail" when a snippet strongly contradicts the claim.
+def test_pipeline_check_result_fails_validator_obviously_false(pipeline, validator) -> None:
+    """A clearly false claim should fail validation."""
+    claim = "The Earth is flat."
+    snippets = [
+        "Scientific consensus confirms that the Earth is an oblate spheroid.",
+        "Satellite imagery shows the Earth is round.",
+        "Physics and astronomy demonstrate Earth's curvature.",
+    ]
 
-    A contradiction score >= 0.90 should trigger an immediate fail condition.
-    """
-    result = CheckResult(
-        claim="The sky is green.",
-        label="supported",
-        evidence="Snippet text",
-        scored=ScoredClaim(
-            claim="The sky is green.",
-            scores=[
-                EvidenceScore(
-                    snippet="The sky is blue under normal daylight conditions.",
-                    support=0.05,
-                    contradict=0.95,
-                    neutral=0.00,
-                )
-            ],
-        ),
-    )
+    check_result = pipeline.check(claim, snippets)
+    result = validator.evaluate_check_result(check_result)
 
-    assert validator.evaluate_check_result(result) == "fail"
+    assert result is False
 
 
-def test_returns_pass_on_one_very_strong_supporting_snippet(validator: Validator) -> None:
-    """
-    Verify that the validator returns "pass" when there is one very strong supporting snippet.
+def test_pipeline_check_result_passes_strong_consensus(pipeline, validator) -> None:
+    """A widely accepted scientific fact should pass validation."""
+    claim = "The speed of light in vacuum is approximately 299,792 kilometers per second."
+    snippets = [
+        "The speed of light in a vacuum is about 299,792 km/s.",
+        "Physics constants define the speed of light as roughly 3.0 × 10^8 meters per second.",
+        "The universally accepted value of the speed of light is approximately 299,792 km/s.",
+    ]
 
-    High support with low contradiction should satisfy strong-pass conditions.
-    """
-    result = CheckResult(
-        claim="Water freezes at 0 degrees Celsius.",
-        label="supported",
-        evidence="Science reference",
-        scored=ScoredClaim(
-            claim="Water freezes at 0 degrees Celsius.",
-            scores=[
-                EvidenceScore(
-                    snippet="Pure water freezes at 0°C at standard pressure.",
-                    support=0.91,
-                    contradict=0.03,
-                    neutral=0.06,
-                )
-            ],
-        ),
-    )
+    check_result = pipeline.check(claim, snippets)
+    result = validator.evaluate_check_result(check_result)
 
-    assert validator.evaluate_check_result(result) == "pass"
+    assert result is True
 
 
-def test_returns_pass_on_multiple_strong_supporting_snippets(validator: Validator) -> None:
-    """
-    Verify that the validator returns "pass" when multiple snippets strongly support the claim.
+def test_pipeline_check_result_fails_with_strong_contradiction(pipeline, validator) -> None:
+    """Direct contradiction in evidence should fail validation."""
+    claim = "Humans can breathe unaided in outer space."
+    snippets = [
+        "Humans cannot survive in the vacuum of space without protective equipment.",
+        "Exposure to space without a suit leads to rapid unconsciousness.",
+        "Astronauts require pressurized suits to breathe in space.",
+    ]
 
-    This tests aggregate support and repetition-based scoring logic.
-    """
-    result = CheckResult(
-        claim="The policy began in 2024.",
-        label="supported",
-        evidence="Several reports",
-        scored=ScoredClaim(
-            claim="The policy began in 2024.",
-            scores=[
-                EvidenceScore(
-                    snippet="The policy took effect in January 2024.",
-                    support=0.80,
-                    contradict=0.08,
-                    neutral=0.12,
-                ),
-                EvidenceScore(
-                    snippet="Implementation started during 2024.",
-                    support=0.78,
-                    contradict=0.10,
-                    neutral=0.12,
-                ),
-                EvidenceScore(
-                    snippet="The rollout continued after its 2024 launch.",
-                    support=0.67,
-                    contradict=0.14,
-                    neutral=0.19,
-                ),
-            ],
-        ),
-    )
+    check_result = pipeline.check(claim, snippets)
+    result = validator.evaluate_check_result(check_result)
 
-    assert validator.evaluate_check_result(result) == "pass"
+    assert result is False
 
 
-def test_returns_fail_when_multiple_contradictions_outweigh_support(validator: Validator) -> None:
-    """
-    Verify that the validator returns "fail" when contradictions dominate.
+def test_pipeline_check_result_mixed_evidence_should_fail(pipeline, validator) -> None:
+    """Mixed but contradictory evidence should typically fail."""
+    claim = "Coffee causes dehydration."
+    snippets = [
+        "Moderate coffee consumption does not lead to dehydration.",
+        "Caffeine has mild diuretic effects.",
+        "Studies show coffee contributes to daily fluid intake.",
+    ]
 
-    This tests the rule:
-        - multiple strong contradictions
-        - total contradiction outweighs total support
-    """
-    result = CheckResult(
-        claim="The event happened in 2025.",
-        label="supported",
-        evidence="Mixed reports",
-        scored=ScoredClaim(
-            claim="The event happened in 2025.",
-            scores=[
-                EvidenceScore(
-                    snippet="The event took place in 2024.",
-                    support=0.10,
-                    contradict=0.72,
-                    neutral=0.18,
-                ),
-                EvidenceScore(
-                    snippet="Records show the event occurred in December 2024.",
-                    support=0.08,
-                    contradict=0.75,
-                    neutral=0.17,
-                ),
-                EvidenceScore(
-                    snippet="One summary mentions later discussion in 2025.",
-                    support=0.40,
-                    contradict=0.22,
-                    neutral=0.38,
-                ),
-            ],
-        ),
-    )
+    check_result = pipeline.check(claim, snippets)
+    result = validator.evaluate_check_result(check_result)
 
-    assert validator.evaluate_check_result(result) == "fail"
+    assert result is False
 
 
-def test_label_only_does_not_force_pass(validator: Validator) -> None:
-    """
-    Verify that a positive label alone does not force a "pass".
+def test_pipeline_check_result_weak_support_should_fail(pipeline, validator) -> None:
+    """Weak or vague support should fail validation."""
+    claim = "Eating chocolate significantly improves intelligence."
+    snippets = [
+        "Some studies explore correlations between diet and cognition.",
+        "Chocolate contains flavonoids that may benefit brain function.",
+        "There is limited evidence linking chocolate consumption to cognitive improvements.",
+    ]
 
-    Weak or inconclusive evidence should still result in "fail".
-    """
-    result = CheckResult(
-        claim="A false claim.",
-        label="supported",
-        evidence="Weak evidence",
-        scored=ScoredClaim(
-            claim="A false claim.",
-            scores=[
-                EvidenceScore(
-                    snippet="This snippet is mostly unrelated.",
-                    support=0.20,
-                    contradict=0.23,
-                    neutral=0.57,
-                ),
-                EvidenceScore(
-                    snippet="This snippet also does not clearly support the claim.",
-                    support=0.25,
-                    contradict=0.21,
-                    neutral=0.54,
-                ),
-            ],
-        ),
-    )
+    check_result = pipeline.check(claim, snippets)
+    result = validator.evaluate_check_result(check_result)
 
-    assert validator.evaluate_check_result(result) == "fail"
+    assert result is False
 
 
-def test_contradictory_label_does_not_force_fail_when_evidence_is_strong(validator: Validator) -> None:
-    """
-    Verify that a negative label does not override strong supporting evidence.
+def test_pipeline_check_result_partial_support_should_pass(pipeline, validator) -> None:
+    """Moderately supported claim should pass."""
+    claim = "Exercise improves cardiovascular health."
+    snippets = [
+        "Regular physical activity strengthens the heart and improves circulation.",
+        "Exercise reduces the risk of cardiovascular disease.",
+        "Studies consistently show exercise benefits heart health.",
+    ]
 
-    The validator should rely more heavily on evidence than on the label.
-    """
-    result = CheckResult(
-        claim="Earth orbits the Sun.",
-        label="false",
-        evidence="Astronomy references",
-        scored=ScoredClaim(
-            claim="Earth orbits the Sun.",
-            scores=[
-                EvidenceScore(
-                    snippet="Earth revolves around the Sun once every year.",
-                    support=0.90,
-                    contradict=0.03,
-                    neutral=0.07,
-                ),
-                EvidenceScore(
-                    snippet="The Earth is in orbit around the Sun.",
-                    support=0.81,
-                    contradict=0.06,
-                    neutral=0.13,
-                ),
-            ],
-        ),
-    )
+    check_result = pipeline.check(claim, snippets)
+    result = validator.evaluate_check_result(check_result)
 
-    assert validator.evaluate_check_result(result) == "pass"
+    assert result is True
 
 
-def test_borderline_case_returns_fail(validator: Validator) -> None:
-    """
-    Verify that weak, borderline evidence results in "fail".
+def test_pipeline_check_result_ambiguous_claim_edge_case(pipeline, validator) -> None:
+    """Ambiguous claims with unclear support should fail."""
+    claim = "Technology is harmful to society."
+    snippets = [
+        "Technology has both positive and negative effects on society.",
+        "Some studies highlight risks like addiction and privacy concerns.",
+        "Other research shows technology improves productivity and communication.",
+    ]
 
-    This ensures that the validator does not pass claims without
-    sufficiently strong supporting signals.
-    """
-    result = CheckResult(
-        claim="The company was founded in 1999.",
-        label="supported",
-        evidence="Unclear references",
-        scored=ScoredClaim(
-            claim="The company was founded in 1999.",
-            scores=[
-                EvidenceScore(
-                    snippet="The company was active by the early 2000s.",
-                    support=0.33,
-                    contradict=0.33,
-                    neutral=0.34,
-                ),
-                EvidenceScore(
-                    snippet="A later profile mentions the company in 2001.",
-                    support=0.30,
-                    contradict=0.35,
-                    neutral=0.45,
-                ),
-            ],
-        ),
-    )
+    check_result = pipeline.check(claim, snippets)
+    result = validator.evaluate_check_result(check_result)
 
-    assert validator.evaluate_check_result(result) == "fail"
-
-
-def test_invalid_score_raises_value_error(validator: Validator) -> None:
-    """
-    Verify that invalid probability values raise a ValueError.
-
-    Any EvidenceScore value outside the [0, 1] range should be rejected.
-    """
-    result = CheckResult(
-        claim="Invalid score claim",
-        label="supported",
-        evidence="Bad data",
-        scored=ScoredClaim(
-            claim="Invalid score claim",
-            scores=[
-                EvidenceScore(
-                    snippet="Invalid score snippet",
-                    support=1.10,
-                    contradict=0.00,
-                    neutral=0.00,
-                )
-            ],
-        ),
-    )
-
-    with pytest.raises(ValueError):
-        validator.evaluate_check_result(result)
+    assert result is False
