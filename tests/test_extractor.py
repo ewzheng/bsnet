@@ -111,7 +111,6 @@ def test_political_claim(extractor: Extractor) -> None:
         print(f"  claim: {c.text}")
 
     assert len(claims) >= 1
-    for claim in claims:
 
 
 # ── Science and health claims ────────────────────────────────────────────────
@@ -141,7 +140,6 @@ def test_health_claim(extractor: Extractor) -> None:
         print(f"  claim: {c.text}")
 
     assert len(claims) >= 1
-    for claim in claims:
 
 
 # ── Multi-sentence and paragraph inputs ──────────────────────────────────────

@@ -16,15 +16,14 @@ from bsnet.src.utils.outputs import Verdict
 from bsnet.src.utils.search import get_search_snippets as search_fn
 
 _LABEL_EMOJI: dict[str, str] = {
-    "true": "✅",
-    "mostly true": "✅",
+    "true": "✔️",
+    "mostly true": "✔️",
     "partially true": "🟡",
-    "mixture": "⚖️",
+    "mixture": "〰️",
     "partially false": "🟠",
     "mostly false": "❌",
     "false": "❌",
     "unproven": "❓",
-    "opinion": "💭",
     "no-evidence": "⛔",
 }
 

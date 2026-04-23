@@ -63,17 +63,14 @@ class Pipeline:
         """Score a claim against search results and assign a label.
 
         Always returns a ``CheckResult`` so downstream stages can
-        surface dropped cases (no evidence, opinion) instead of
-        silently discarding them. The distinguishing signal lives on
-        ``label``:
+        surface dropped cases instead of silently discarding them.
+        The distinguishing signal lives on ``label``:
 
         - ``"no-evidence"`` — the search returned nothing usable; the
           scorer never ran. ``evidence`` is empty and ``scored.scores``
-          is empty.
-        - ``"opinion"`` — the scorer ran but produced no support or
-          contradiction signal. ``render()`` will short-circuit and
-          emit a minimal verdict for both of these labels.
-        - One of the remaining eight factual labels — normal path.
+          is empty. ``render()`` short-circuits with a static notice.
+        - One of the eight factual labels from ``label_claim`` —
+          normal path.
 
         Does not render an explanation — call ``render()`` after
         validation to produce the final verdict.
@@ -84,14 +81,14 @@ class Pipeline:
 
         Returns:
             A ``CheckResult`` whose ``label`` reflects either a
-            normal verdict or a dropped-case marker.
+            normal verdict or ``"no-evidence"``.
 
         Preconditions:
             - ``claim`` is a non-empty string.
 
         Postconditions:
-            - ``label`` is one of the factual verdict strings,
-              ``"opinion"``, or ``"no-evidence"``.
+            - ``label`` is one of the factual verdict strings or
+              ``"no-evidence"``.
             - For ``"no-evidence"`` labels, ``scored.scores`` is empty.
         """
         scored = self._scorer.score(claim, snippets)
@@ -118,11 +115,11 @@ class Pipeline:
         For factual results the returned ``explanation`` concatenates
         the LLM-generated natural-language verdict with a short
         aggregation summary of the evidence that drove the label,
-        separated by a ``-----`` divider. For dropped cases
-        (``"no-evidence"`` or ``"opinion"``) the LLM is bypassed and
-        the explanation is a short static notice — the claim is still
-        surfaced to the user, but no expensive rendering is spent on
-        a claim that could not be fact-checked.
+        separated by a ``-----`` divider. For the ``"no-evidence"``
+        case the LLM is bypassed and the explanation is a short static
+        notice — the claim is still surfaced to the user, but no
+        expensive rendering is spent on a claim that could not be
+        fact-checked.
 
         Call this after ``check()`` and any validation steps.
 
@@ -139,8 +136,8 @@ class Pipeline:
             - The ``Verdict`` has a non-empty explanation.
             - Factual verdicts include a ``-----`` divider followed
               by an evidence-aggregation summary line.
-            - Dropped verdicts (``"no-evidence"`` / ``"opinion"``)
-              carry a short static notice instead of an LLM output.
+            - ``"no-evidence"`` verdicts carry a short static notice
+              instead of an LLM output.
         """
         if result.label == "no-evidence":
             return Verdict(
@@ -150,16 +147,6 @@ class Pipeline:
                 explanation=(
                     "Dropped — the search returned no usable evidence "
                     "snippets for this claim."
-                ),
-            )
-        if result.label == "opinion":
-            return Verdict(
-                claim=result.claim,
-                label=result.label,
-                evidence=result.evidence,
-                explanation=(
-                    "Dropped — this claim was classified as opinion "
-                    "and not fact-checked."
                 ),
             )
 

@@ -358,17 +358,16 @@ class Orchestrator:
         """Gate scored results through ``validate_fn`` before rendering.
 
         Results for which ``validate_fn`` returns ``False`` are
-        dropped; accepted results are forwarded unchanged. Dropped
-        labels (``"no-evidence"`` and ``"opinion"``) bypass the
-        validator entirely — they are already decided and the user
-        asked to surface them rather than let a validator silently
-        discard them.
+        dropped; accepted results are forwarded unchanged. The
+        ``"no-evidence"`` label bypasses the validator entirely — it's
+        already decided and the user asked to surface it rather than
+        let a validator silently discard it.
 
         Preconditions:
             - Invoked only from the validate stage thread.
 
         Postconditions:
-            - Every accepted or dropped-label result has been enqueued
+            - Every accepted or no-evidence result has been enqueued
               onto ``_result_q``.
             - Any exception has been captured via ``_record_error``.
             - Exactly one sentinel has been enqueued onto
@@ -379,7 +378,7 @@ class Orchestrator:
                 item = self._check_q.get()
                 if item is self._SENTINEL:
                     break
-                if item.label in ("no-evidence", "opinion"):
+                if item.label == "no-evidence":
                     self._result_q.put(item)
                 elif self._validate_fn(item):
                     self._result_q.put(item)

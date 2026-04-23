@@ -21,7 +21,7 @@ from transformers import (
 # ── Default model identifiers ────────────────────────────────────────────────
 EXTRACTOR_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 EXTRACTOR_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
-SCORER_MODEL = "cross-encoder/nli-deberta-v3-base"
+SCORER_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
 RENDERER_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 RENDERER_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
 
@@ -57,16 +57,28 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 # the labeler automatically retunes the summary too.
 STRONG_SIGNAL = 0.9
 WEAK_SIGNAL = 0.3
-NEUTRAL_SIGNAL = 0.1
 
 
 def label_claim(scores: list) -> tuple[str, str]:
     """Aggregate NLI scores across all evidence snippets into a verdict.
 
-    Uses a hybrid max-pool and count-based approach: peak signal strength
-    determines whether evidence crosses confidence thresholds, while counts
-    of strongly-signaling snippets detect mixed evidence. Also returns the
-    most relevant snippet for the renderer.
+    Uses three pooling signals in layered order:
+
+    1. **Max pooling** on ``support`` and ``contradict`` gates the
+       coarse categories. When the strongest score in either direction
+       is below ``WEAK_SIGNAL`` the claim is "unproven" — evidence
+       didn't meaningfully support or contradict it.
+    2. **Count pooling** of strong-signal snippets (those above
+       ``STRONG_SIGNAL``) catches cases with any confident evidence.
+    3. **Ratio-aware logic** between the two counts decides between
+       "mostly true", "mixture", and "mostly false" when *both*
+       directions have strong snippets: a 2:1 ratio or better in either
+       direction tilts toward "mostly" rather than "mixture". This
+       keeps a single noisy-contradict snippet from flipping a
+       confidently supported claim all the way to "mixture".
+
+    Also returns the most relevant snippet for the renderer (the one
+    with the strongest non-neutral signal).
 
     Args:
         scores: A list of ``EvidenceScore`` objects from the scorer.
@@ -75,9 +87,8 @@ def label_claim(scores: list) -> tuple[str, str]:
         A tuple of ``(label, best_snippet)`` where label is one of
         ``"true"``, ``"mostly true"``, ``"partially true"``,
         ``"mixture"``, ``"partially false"``, ``"mostly false"``,
-        ``"false"``, ``"unproven"``, or ``"opinion"``, and
-        ``best_snippet`` is the snippet text with the strongest
-        non-neutral signal.
+        ``"false"``, or ``"unproven"``, and ``best_snippet`` is the
+        snippet text with the strongest non-neutral signal.
 
     Preconditions:
         - ``scores`` is a non-empty list of ``EvidenceScore`` objects.
@@ -85,7 +96,7 @@ def label_claim(scores: list) -> tuple[str, str]:
           ``contradict`` (float), and ``neutral`` (float) attributes.
 
     Postconditions:
-        - Returns exactly one of the nine label strings.
+        - Returns exactly one of the eight label strings.
         - ``best_snippet`` is always a non-empty string from the input.
         - ``scores`` is not mutated.
     """
@@ -112,12 +123,14 @@ def label_claim(scores: list) -> tuple[str, str]:
         if s.contradict > STRONG_SIGNAL:
             n_strong_contradict += 1
 
-    if max_support < NEUTRAL_SIGNAL and max_contradict < NEUTRAL_SIGNAL:
-        return ("opinion", best_snippet)
     if max_support < WEAK_SIGNAL and max_contradict < WEAK_SIGNAL:
         return ("unproven", best_snippet)
 
     if n_strong_support > 0 and n_strong_contradict > 0:
+        if n_strong_support >= 2 * n_strong_contradict:
+            return ("mostly true", best_snippet)
+        if n_strong_contradict >= 2 * n_strong_support:
+            return ("mostly false", best_snippet)
         return ("mixture", best_snippet)
 
     if n_strong_support > 0 and n_strong_contradict == 0:

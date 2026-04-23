@@ -71,17 +71,24 @@ class Extractor:
         """
         raw_claims = generate_llm(
             self._model,
-            "Extract each checkable fact from this text. Write each as "
-            "a full sentence with its subject explicitly named, one per "
-            "line. If one sentence combines multiple facts, split it "
-            "into separate lines. Do not write fragments or bare "
-            "numbers. Exclude opinions. Say \"none\" if there are no "
-            f"facts.\n\n{text}",
+            "Extract each checkable fact from the text below. Write each "
+            "as a full sentence with its subject explicitly named, one "
+            "per line. If one sentence joins multiple facts with \"and\", "
+            "\"but\", \"while\", or a comma, split them into separate "
+            "lines — even when the facts share a subject or a time "
+            "phrase. Do not write fragments or bare numbers. Exclude "
+            "opinions. Say \"none\" if there are no facts.\n\n"
+            f"Text: {text}\n"
+            "Facts:\n"
+            "{fact1}\n"
+            "{fact2}",
             thinking=True,
             max_tokens=256,
             temperature=0.3,
         )
         body = raw_claims.strip()
+        if body.lower().startswith("facts:"):
+            body = body[len("facts:"):].strip()
         if not body or body.lower() == "none":
             return []
 
@@ -89,6 +96,8 @@ class Extractor:
         for claim_text in body.splitlines():
             claim_text = claim_text.strip().lstrip("0123456789.-) ")
             if not claim_text or claim_text.lower() == "none":
+                continue
+            if claim_text.lower() in ("facts:", "{fact1}", "{fact2}"):
                 continue
             claims.append(Claim(text=claim_text))
 

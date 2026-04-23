@@ -65,8 +65,15 @@ def test_contradicted_claim_produces_false(pipe: Pipeline) -> None:
     assert verdict.explanation.strip()
 
 
-def test_opinion_is_flagged_as_opinion_label(pipe: Pipeline) -> None:
-    """Opinion claims should carry the ``opinion`` label for downstream surfacing."""
+def test_subjective_claim_flagged_unproven(pipe: Pipeline) -> None:
+    """Subjective claims with unrelated evidence should land in the ``unproven`` bucket.
+
+    The original ``opinion`` label was collapsed into ``unproven``
+    because NLI-score-based detection can't reliably distinguish
+    subjective claims from simply-unrelated evidence — both manifest
+    as a flat score distribution. Both cases now flow through the
+    same low-signal path.
+    """
     result = pipe.check(
         claim="I believe we need to do better as a country.",
         snippets=[
@@ -74,11 +81,11 @@ def test_opinion_is_flagged_as_opinion_label(pipe: Pipeline) -> None:
             "Bureau of Economic Analysis.",
         ],
     )
-    print(f"\n--- opinion claim ---")
+    print(f"\n--- subjective claim ---")
     print(f"  label: {result.label}")
 
     assert result is not None
-    assert result.label == "opinion"
+    assert result.label == "unproven"
 
 
 def test_empty_snippets_is_flagged_as_no_evidence(pipe: Pipeline) -> None:

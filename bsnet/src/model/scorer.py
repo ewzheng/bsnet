@@ -18,10 +18,14 @@ class Scorer:
     subsequent inference calls.
     """
 
-    # Label indices for the NLI model output logits
-    _LABEL_CONTRADICTION = 0
-    _LABEL_ENTAILMENT = 1
-    _LABEL_NEUTRAL = 2
+    # Label indices for the NLI model output logits. MoritzLaurer's
+    # DeBERTa-v3-*-mnli-fever-anli-ling-wanli family orders its labels
+    # as entailment/neutral/contradiction; the older cross-encoder
+    # family used the reverse. Swapping the model requires swapping
+    # these constants.
+    _LABEL_ENTAILMENT = 0
+    _LABEL_NEUTRAL = 1
+    _LABEL_CONTRADICTION = 2
 
     def __init__(self, model_name: str = SCORER_MODEL, device: str = "auto") -> None:
         """Load the NLI cross-encoder model and tokenizer.
@@ -46,9 +50,14 @@ class Scorer:
     def score(self, claim: str, snippets: list[str]) -> ScoredClaim | None:
         """Score a claim against all retrieved evidence snippets.
 
-        Runs NLI inference on each (claim, snippet) pair and returns
-        all results so the labeler can aggregate across the full
-        evidence set.
+        Runs a single batched NLI forward pass over every
+        ``(snippet, claim)`` pair instead of looping one call per
+        snippet. The tokenizer pads the pairs into a single tensor
+        with shape ``(N, seq_len)``, the model returns logits of
+        shape ``(N, 3)``, and softmax is applied row-wise — so one
+        forward pass produces probabilities for every snippet at
+        once. On CPU this amortizes BLAS and kernel-launch overhead
+        across the batch; on GPU it's free.
 
         Args:
             claim: The factual claim text to verify.
@@ -66,49 +75,31 @@ class Scorer:
         Postconditions:
             - Does not mutate the model or any input arguments.
             - Each score's probabilities sum to approximately 1.0.
+            - Returned ``scores`` preserves input order: ``scores[i]``
+              corresponds to ``snippets[i]``.
         """
         if not snippets:
             return None
 
-        scores: list[EvidenceScore] = []
-        for snippet in snippets:
-            probs = self._classify(snippet, claim)
-            scores.append(EvidenceScore(
-                snippet=snippet,
-                support=probs[1],
-                contradict=probs[0],
-                neutral=probs[2],
-            ))
-
-        return ScoredClaim(claim=claim, scores=scores)
-
-    def _classify(self, premise: str, hypothesis: str) -> tuple[float, float, float]:
-        """Run NLI classification on a single (premise, hypothesis) pair.
-
-        Args:
-            premise: The evidence snippet (NLI premise).
-            hypothesis: The claim to verify (NLI hypothesis).
-
-        Returns:
-            A tuple of ``(contradiction, entailment, neutral)``
-            probabilities.
-
-        Preconditions:
-            - Both inputs are non-empty strings.
-            - The model is loaded and in eval mode.
-
-        Postconditions:
-            - Does not mutate model state.
-            - Returned probabilities sum to approximately 1.0.
-        """
         inputs = self._tokenizer(
-            premise, hypothesis,
+            snippets,
+            [claim] * len(snippets),
             return_tensors="pt",
             truncation=True,
+            padding=True,
         ).to(self._device)
         with torch.no_grad():
             logits = self._model(**inputs).logits
-        probs = torch.softmax(logits, dim=1).squeeze().tolist()
-        return (probs[self._LABEL_CONTRADICTION],
-                probs[self._LABEL_ENTAILMENT],
-                probs[self._LABEL_NEUTRAL])
+        probs = torch.softmax(logits, dim=1).tolist()
+
+        scores: list[EvidenceScore] = [
+            EvidenceScore(
+                snippet=snippet,
+                support=row[self._LABEL_ENTAILMENT],
+                contradict=row[self._LABEL_CONTRADICTION],
+                neutral=row[self._LABEL_NEUTRAL],
+            )
+            for snippet, row in zip(snippets, probs)
+        ]
+
+        return ScoredClaim(claim=claim, scores=scores)
