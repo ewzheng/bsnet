@@ -44,7 +44,7 @@ class Extractor:
         """
         self._model = load_llm(repo, gguf_file, n_ctx=n_ctx)
 
-    def extract(self, text: str) -> list[Claim]:
+    def extract(self, text: str, context: str = "") -> list[Claim]:
         """Run single-pass claim extraction on an input string.
 
         Asks the model (in thinking mode) to identify factual claims
@@ -54,8 +54,19 @@ class Extractor:
         LLM call) and more reliable (key specifics like numbers and
         dates can't be dropped by a flaky keyword-generation pass).
 
+        When ``context`` is non-empty, the prompt is reshaped to ask
+        the model to extract facts from ``text`` only, using the
+        preceding context solely to resolve pronouns and implicit
+        references. This keeps ambiguous sentences like
+        ``"It was the largest ever recorded"`` from yielding
+        ungrounded claims that send the search stage chasing
+        irrelevant topics.
+
         Args:
-            text: The fully formatted input string.
+            text: The fully formatted input string — the current
+                sentence to extract claims from.
+            context: Concatenated prior sentences from the transcript
+                buffer. Empty string means no context is available.
 
         Returns:
             A list of ``Claim`` objects. Empty if no factual claims
@@ -69,19 +80,43 @@ class Extractor:
             - Does not mutate the model or input.
             - Each returned ``Claim`` has a non-empty ``text``.
         """
+        context = context.strip()
+        if context:
+            prompt = (
+                "Extract each checkable fact from the latest sentence. "
+                "Use the preceding context only to resolve pronouns and "
+                "implicit references — do not extract facts that appear "
+                "only in the context. Write each as a full sentence with "
+                "its subject explicitly named, one per line. If one "
+                "sentence joins multiple facts with \"and\", \"but\", "
+                "\"while\", or a comma, split them into separate lines — "
+                "even when the facts share a subject or a time phrase. "
+                "Do not write fragments or bare numbers. Exclude "
+                "opinions. Say \"none\" if there are no facts.\n\n"
+                f"Context: {context}\n"
+                f"Latest: {text}\n"
+                "Facts:\n"
+                "{fact1}\n"
+                "{fact2}"
+            )
+        else:
+            prompt = (
+                "Extract each checkable fact from the text below. Write "
+                "each as a full sentence with its subject explicitly "
+                "named, one per line. If one sentence joins multiple "
+                "facts with \"and\", \"but\", \"while\", or a comma, "
+                "split them into separate lines — even when the facts "
+                "share a subject or a time phrase. Do not write "
+                "fragments or bare numbers. Exclude opinions. Say "
+                "\"none\" if there are no facts.\n\n"
+                f"Text: {text}\n"
+                "Facts:\n"
+                "{fact1}\n"
+                "{fact2}"
+            )
         raw_claims = generate_llm(
             self._model,
-            "Extract each checkable fact from the text below. Write each "
-            "as a full sentence with its subject explicitly named, one "
-            "per line. If one sentence joins multiple facts with \"and\", "
-            "\"but\", \"while\", or a comma, split them into separate "
-            "lines — even when the facts share a subject or a time "
-            "phrase. Do not write fragments or bare numbers. Exclude "
-            "opinions. Say \"none\" if there are no facts.\n\n"
-            f"Text: {text}\n"
-            "Facts:\n"
-            "{fact1}\n"
-            "{fact2}",
+            prompt,
             thinking=True,
             max_tokens=256,
             temperature=0.3,

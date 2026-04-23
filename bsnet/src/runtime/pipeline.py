@@ -40,12 +40,18 @@ class Pipeline:
         self._scorer = Scorer()
         self._renderer = Renderer()
 
-    def extract(self, sentence: str) -> list[Claim]:
+    def extract(self, sentence: str, context: str = "") -> list[Claim]:
         """Extract checkable claims from a transcript sentence.
 
         Args:
             sentence: The current transcript sentence to extract
                 claims from.
+            context: Concatenated prior sentences from the transcript
+                buffer. Used only to resolve pronouns and implicit
+                references in ``sentence``; facts that appear only
+                in the context are not re-extracted. Empty string
+                (the default) means no context is available — first
+                sentence in a stream, or tests that don't care.
 
         Returns:
             A list of ``Claim`` objects. Empty when no checkable
@@ -57,7 +63,7 @@ class Pipeline:
         Postconditions:
             - Each returned ``Claim`` has non-empty text.
         """
-        return self._extractor.extract(sentence)
+        return self._extractor.extract(sentence, context=context)
 
     def check(self, claim: str, snippets: list[str]) -> CheckResult:
         """Score a claim against search results and assign a label.

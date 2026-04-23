@@ -245,10 +245,18 @@ def load_model(
     model_name: str,
     task: str = "seq2seq",
     device: str = "auto",
+    quantization_config: object | None = None,
 ) -> tuple:
     """Load a HuggingFace transformers model and tokenizer.
 
     For GGUF models, use ``load_llm`` instead.
+
+    When ``quantization_config`` is supplied, it's forwarded to
+    ``from_pretrained`` — the transformers integration handles device
+    placement and the explicit ``model.to(device)`` call is skipped
+    because quantized weights are already placed by the quantization
+    backend (e.g. bitsandbytes dispatches to CUDA, XPU, or CPU based
+    on runtime detection and the config's settings).
 
     Args:
         model_name: HuggingFace model identifier to load.
@@ -257,10 +265,17 @@ def load_model(
             ``"classification"`` for encoder models (NLI, BERT).
         device: ``"auto"`` to detect the best available device,
             or an explicit device string (``"cpu"``, ``"cuda"``).
+            Ignored when ``quantization_config`` is provided.
+        quantization_config: Optional ``BitsAndBytesConfig`` (or any
+            other HF quantization config) to pass through to
+            ``from_pretrained``. ``None`` (the default) loads full
+            precision.
 
     Returns:
         A tuple of ``(tokenizer, model, device_str)`` ready for
-        inference.
+        inference. ``device_str`` is the resolved device string for
+        full-precision loads; for quantized loads it reflects where
+        the quantized backend placed the weights.
 
     Raises:
         ValueError: If ``task`` is not a recognized value.
@@ -271,22 +286,33 @@ def load_model(
           ``"classification"``.
 
     Postconditions:
-        - The model is in eval mode and placed on the resolved device.
+        - The model is in eval mode.
+        - For full-precision loads, the model is placed on the
+          resolved device.
+        - For quantized loads, placement is owned by the quantization
+          backend.
         - The tokenizer matches the model architecture.
     """
     resolved = resolve_device(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    load_kwargs: dict = {}
+    if quantization_config is not None:
+        load_kwargs["quantization_config"] = quantization_config
+
     if task == "seq2seq":
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **load_kwargs)
     elif task == "causal":
-        model = AutoModelForCausalLM.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     elif task == "classification":
-        model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name, **load_kwargs,
+        )
     else:
         raise ValueError(f"Unknown task: {task!r}. Use 'seq2seq', 'causal', or 'classification'.")
 
-    model.to(resolved)
+    if quantization_config is None:
+        model.to(resolved)
     model.eval()
     return tokenizer, model, resolved
 

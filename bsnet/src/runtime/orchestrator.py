@@ -224,7 +224,9 @@ class Orchestrator:
 
         Postconditions:
             - All buffered sentences emitted before failure have been
-              enqueued onto ``_sentence_q``.
+              enqueued onto ``_sentence_q`` as ``(context, sentence)``
+              tuples so the extractor can resolve pronouns against
+              recent utterances.
             - Any exception raised by the source or the buffer has
               been captured via ``_record_error``.
             - Exactly one sentinel has been enqueued onto
@@ -232,17 +234,23 @@ class Orchestrator:
         """
         try:
             for chunk in chunk_source:
-                for _context, sentence in self._buffer.push(chunk):
-                    self._sentence_q.put(sentence)
-            for _context, sentence in self._buffer.flush():
-                self._sentence_q.put(sentence)
+                for context, sentence in self._buffer.push(chunk):
+                    self._sentence_q.put((context, sentence))
+            for context, sentence in self._buffer.flush():
+                self._sentence_q.put((context, sentence))
         except BaseException as exc:
             self._record_error(exc)
         finally:
             self._sentence_q.put(self._SENTINEL)
 
     def _extract_loop(self) -> None:
-        """Pull sentences, run extraction, enqueue resulting claims.
+        """Pull (context, sentence) pairs, run extraction, enqueue claims.
+
+        Passes the buffer's rolling context alongside each sentence so
+        the extractor can resolve pronouns and implicit references
+        (``"He became president in 2021"``, ``"It was the largest"``)
+        that would otherwise produce ungrounded claims and send the
+        search stage on a wild goose chase.
 
         Preconditions:
             - Invoked only from the extract stage thread.
@@ -258,7 +266,8 @@ class Orchestrator:
                 item = self._sentence_q.get()
                 if item is self._SENTINEL:
                     break
-                for claim in self._pipeline.extract(item):
+                context, sentence = item
+                for claim in self._pipeline.extract(sentence, context=context):
                     self._claim_q.put(claim)
         except BaseException as exc:
             self._record_error(exc)

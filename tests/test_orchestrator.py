@@ -65,15 +65,23 @@ class FakePipeline:
         self._check_fn = check_fn
         self._render_fn = render_fn
 
-    def extract(self, sentence: str) -> list[Claim]:
+    def extract(self, sentence: str, context: str = "") -> list[Claim]:
         """Record the call and return claims per the override or default.
+
+        The ``context`` argument mirrors the real ``Pipeline.extract``
+        signature; it's accepted but only ``sentence`` is recorded on
+        ``extract_calls`` so existing assertions on sentence ordering
+        continue to hold without leaking context into the expected
+        values.
 
         Preconditions:
             - ``sentence`` is a string.
+            - ``context`` is a string (may be empty).
 
         Postconditions:
             - The sentence has been appended to ``extract_calls``.
         """
+        del context
         self.extract_calls.append(sentence)
         if self._extract_fn is not None:
             return self._extract_fn(sentence)
