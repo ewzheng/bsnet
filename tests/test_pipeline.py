@@ -5,6 +5,7 @@ Includes per-stage latency measurements for benchmarking inference speed.
 These tests require all model weights to be downloaded.
 """
 
+import statistics
 import time
 
 import pytest
@@ -113,7 +114,7 @@ def test_extract_then_check_flow(pipe: Pipeline) -> None:
     print(f"\n--- full flow ---")
     print(f"  claims: {len(claims)}")
     for c in claims:
-        print(f"    {c.text} | queries: {c.queries}")
+        print(f"    {c.text}")
 
     assert len(claims) >= 1
 
@@ -304,6 +305,91 @@ def test_rendering_latency(pipe: Pipeline) -> None:
     print(f"  explanation: {verdict.explanation}")
 
     assert verdict.explanation.strip()
+
+
+def test_pipeline_bench(pipe: Pipeline) -> None:
+    """Multi-sample bench across extract / check / render with canned snippets.
+
+    Runs a small fixed claim set through every stage, reports
+    min / median / mean per stage so the numbers are stable enough
+    to compare across branches, and prints each verdict for quality
+    inspection. Snippets are canned to keep the search backend out
+    of the timing — the network-bound numbers live in
+    ``test_orchestrator_end_to_end_with_real_search``.
+
+    Preconditions:
+        - The ``pipe`` fixture is loaded.
+
+    Postconditions:
+        - One verdict is produced per input claim.
+        - Per-stage timing summaries are printed for manual review.
+    """
+    cases: list[tuple[str, list[str]]] = [
+        (
+            "Argentina won the 2022 FIFA World Cup.",
+            [
+                "Argentina defeated France on penalties in the 2022 FIFA "
+                "World Cup final on December 18, 2022.",
+            ],
+        ),
+        (
+            "Mount Everest is 8,849 meters above sea level.",
+            [
+                "A 2020 Chinese-Nepalese survey established Mount Everest's "
+                "height at 8,849 meters above sea level.",
+            ],
+        ),
+        (
+            "The James Webb Space Telescope launched on December 25, 2021.",
+            [
+                "NASA's James Webb Space Telescope was launched aboard an "
+                "Ariane 5 rocket from French Guiana on December 25, 2021.",
+            ],
+        ),
+    ]
+
+    extract_times: list[float] = []
+    check_times: list[float] = []
+    render_times: list[float] = []
+    verdicts: list[tuple[str, str, str]] = []
+
+    for sentence, snippets in cases:
+        t0 = time.perf_counter()
+        claims = pipe.extract(sentence)
+        extract_times.append(time.perf_counter() - t0)
+        assert len(claims) >= 1
+
+        t1 = time.perf_counter()
+        result = pipe.check(claims[0].text, snippets)
+        check_times.append(time.perf_counter() - t1)
+        assert result is not None
+
+        t2 = time.perf_counter()
+        verdict = pipe.render(result)
+        render_times.append(time.perf_counter() - t2)
+        assert verdict.explanation.strip()
+
+        verdicts.append((claims[0].text, verdict.label, verdict.explanation))
+
+    def _summarize(label: str, samples: list[float]) -> None:
+        print(
+            f"  {label:8s}  min={min(samples):.2f}s  "
+            f"median={statistics.median(samples):.2f}s  "
+            f"mean={statistics.mean(samples):.2f}s  "
+            f"n={len(samples)}"
+        )
+
+    print(f"\n--- pipeline bench (n={len(cases)} claims, canned snippets) ---")
+    _summarize("extract", extract_times)
+    _summarize("check", check_times)
+    _summarize("render", render_times)
+    totals = [e + c + r for e, c, r in zip(extract_times, check_times, render_times)]
+    _summarize("total", totals)
+
+    print("\n--- bench verdicts ---")
+    for claim, label, explanation in verdicts:
+        print(f"  [{label}] {claim}")
+        print(f"    {explanation}")
 
 
 def test_end_to_end_latency(pipe: Pipeline) -> None:

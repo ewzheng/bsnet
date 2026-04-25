@@ -173,7 +173,9 @@ def _relevance_filter(query: str, snippets: list[str]) -> list[str]:
     Postconditions:
         - Returned list preserves input order.
         - Returned list is a subset of ``snippets``.
-        - ``len(result) >= max(ceil(len(snippets) * MIN_KEEP_FRAC), 1)``.
+        - ``len(result) >= max(floor(len(snippets) * MIN_KEEP_FRAC), 1)``
+          when ``len(snippets) > 2``; passes the input through
+          unchanged otherwise.
     """
     if len(snippets) <= 2:
         return snippets

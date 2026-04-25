@@ -311,11 +311,16 @@ class Orchestrator:
 
         Passes the claim's full text directly as the search query —
         specifics like numbers and dates survive verbatim, and no
-        second LLM call is needed to derive keywords. Exceptions are
-        captured rather than propagated so one failing search does not
-        poison the pool. The shutdown handshake is unaffected;
-        missing snippets simply mean no ``CheckResult`` is produced
-        for that claim.
+        second LLM call is needed to derive keywords.
+
+        Per-backend exceptions inside ``get_search_snippets`` are
+        already swallowed there (a flaky engine just contributes zero
+        snippets), so reaching this handler indicates a catastrophic
+        failure — e.g. the relevance-filter embedder failed to load.
+        Such an exception is captured via ``_record_error`` and will
+        be re-raised to the consumer once the pipeline drains; the
+        pool itself is not poisoned and in-flight tasks finish
+        normally. The shutdown handshake is unaffected.
 
         Args:
             claim: The claim whose text should be searched.
