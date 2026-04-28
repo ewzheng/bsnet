@@ -14,6 +14,7 @@ from bsnet.src.runtime.orchestrator import Orchestrator
 from bsnet.src.runtime.pipeline import Pipeline
 from bsnet.src.utils.outputs import CheckResult
 from bsnet.src.utils.search import get_search_snippets
+from bsnet.src.validation.validator import Validator
 
 
 @pytest.fixture(scope="module")
@@ -193,14 +194,14 @@ def test_orchestrator_end_to_end_with_real_pipeline(pipe: Pipeline) -> None:
 
 
 def test_orchestrator_end_to_end_with_real_search(pipe: Pipeline) -> None:
-    """Exercise the whole stack — real pipeline and real DDGS search.
+    """Exercise the whole stack — real pipeline, real DDGS search, real Validator.
 
     Mirrors the wiring ``main()`` uses when driven by ``listen()``:
     the real ``Pipeline``, ``get_search_snippets`` passed directly
-    as the search callable, and the default pass-through validator.
-    Feeds a single fake chunk in place of the transcription stream
-    so we can measure end-to-end latency with the network call in
-    the loop.
+    as the search callable, and ``Validator`` injected as the
+    validate stage. Feeds a single fake chunk in place of the
+    transcription stream so we can measure end-to-end latency with
+    the network call in the loop.
 
     Requires a live network connection. Fails loudly if DuckDuckGo
     returns nothing usable, which is a valid signal that the search
@@ -217,6 +218,7 @@ def test_orchestrator_end_to_end_with_real_search(pipe: Pipeline) -> None:
     orch = Orchestrator(
         pipeline=pipe,
         search_fn=get_search_snippets,
+        validate_fn=Validator().evaluate_check_result,
     )
 
     chunks = ["The unemployment rate dropped to 3.4% in January 2023."]

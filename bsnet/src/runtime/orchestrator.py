@@ -65,11 +65,13 @@ def _default_search(query: str) -> list[str]:
 
 
 def _default_validate(result: CheckResult) -> bool:
-    """Placeholder validation callable used until the real branch merges.
+    """Pass-through default for ``validate_fn``.
 
-    Passes every ``CheckResult`` through unchanged. The real
-    implementation will live under ``bsnet/src/validation/`` and
-    should be injected into ``Orchestrator`` via ``validate_fn``.
+    Accepts every ``CheckResult`` unchanged. The CLI entry point
+    (``bsnet.src.__main__``) injects the real
+    ``Validator.evaluate_check_result`` so the orchestrator stays
+    decoupled from the validation module; this default keeps tests
+    that don't care about gating wiring-free.
 
     Args:
         result: Scored and labeled check result from the scorer stage.
@@ -83,7 +85,6 @@ def _default_validate(result: CheckResult) -> bool:
     Postconditions:
         - Does not mutate ``result``.
     """
-    # TODO: replace with real validation integration once that branch lands.
     del result
     return True
 

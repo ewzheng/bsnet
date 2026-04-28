@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from bsnet.src.runtime.orchestrator import Orchestrator
 from bsnet.src.utils.outputs import Verdict
 from bsnet.src.utils.search import get_search_snippets as search_fn
+from bsnet.src.validation.validator import Validator
 
 _LABEL_EMOJI: dict[str, str] = {
     "true": "✔️",
@@ -99,7 +100,10 @@ def main(chunk_source: Iterable[str] | None = None) -> int:
         except Exception:
             pass
 
-    orch = Orchestrator(search_fn=search_fn)
+    orch = Orchestrator(
+        search_fn=search_fn,
+        validate_fn=Validator().evaluate_check_result,
+    )
     for verdict in orch.run(chunk_source):
         print(_format_verdict(verdict))
         print()
