@@ -55,27 +55,48 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 # Shared by ``label_claim`` (for labeling) and the pipeline's evidence
 # summary (for post-hoc display). Keep these in one place so tuning
 # the labeler automatically retunes the summary too.
+#
+# ``MODERATE_SIGNAL`` is the count-pool threshold the labeler uses
+# when no snippet on either side breaks ``STRONG_SIGNAL`` — important
+# for adversarial claims where DeBERTa-base lands two or three
+# snippets in the 0.6–0.9 band without anything crossing 0.9 (e.g.
+# the post-dedup "Earth is flat" case where two contradicts at 0.67
+# and 0.75 should outweigh one stubborn 0.79 support snippet).
+# ``MODERATE_SIGNAL`` is intentionally not used by the post-hoc
+# summary in ``pipeline._summarize_evidence`` so user-facing labels
+# like "strong support" / "weak support" stay anchored to the
+# original 0.9 / 0.3 bins.
 STRONG_SIGNAL = 0.9
+MODERATE_SIGNAL = 0.6
 WEAK_SIGNAL = 0.3
 
 
 def label_claim(scores: list) -> tuple[str, str]:
     """Aggregate NLI scores across all evidence snippets into a verdict.
 
-    Uses three pooling signals in layered order:
+    Walks a layered ladder of pooling signals from strongest to
+    weakest:
 
-    1. **Max pooling** on ``support`` and ``contradict`` gates the
-       coarse categories. When the strongest score in either direction
-       is below ``WEAK_SIGNAL`` the claim is "unproven" — evidence
-       didn't meaningfully support or contradict it.
-    2. **Count pooling** of strong-signal snippets (those above
-       ``STRONG_SIGNAL``) catches cases with any confident evidence.
-    3. **Ratio-aware logic** between the two counts decides between
-       "mostly true", "mixture", and "mostly false" when *both*
-       directions have strong snippets: a 2:1 ratio or better in either
-       direction tilts toward "mostly" rather than "mixture". This
-       keeps a single noisy-contradict snippet from flipping a
-       confidently supported claim all the way to "mixture".
+    1. **Weak gate.** When neither side reaches ``WEAK_SIGNAL`` the
+       claim is "unproven" — evidence didn't meaningfully support or
+       contradict it.
+    2. **Strong-signal count pooling** (``> STRONG_SIGNAL``). With a
+       2:1-or-better ratio in one direction the verdict is "mostly
+       true" / "mostly false"; otherwise "mixture". Pure-strong on
+       one side resolves to "true" or "mostly true" (or the false
+       symmetric pair) depending on whether the opposite side broke
+       ``WEAK_SIGNAL``.
+    3. **Moderate-signal count pooling** (``> MODERATE_SIGNAL``).
+       Same 2:1 ratio logic, used when nothing crossed
+       ``STRONG_SIGNAL`` on either side. Closes the failure mode
+       where multiple 0.6–0.9 snippets accumulate without any
+       individually clearing 0.9 — under the old logic the labeler
+       fell straight to ``max_support`` vs ``max_contradict`` and
+       lost on a single high-support outlier despite the count
+       favoring the other direction.
+    4. **Max-pool fallback.** Only when no side reaches even
+       ``MODERATE_SIGNAL`` — picks "partially true" or "partially
+       false" by which side's peak is higher.
 
     Also returns the most relevant snippet for the renderer (the one
     with the strongest non-neutral signal).
@@ -106,6 +127,8 @@ def label_claim(scores: list) -> tuple[str, str]:
     max_contradict = 0.0
     n_strong_support = 0
     n_strong_contradict = 0
+    n_moderate_support = 0
+    n_moderate_contradict = 0
 
     for s in scores:
         signal = max(s.support, s.contradict)
@@ -122,6 +145,10 @@ def label_claim(scores: list) -> tuple[str, str]:
             n_strong_support += 1
         if s.contradict > STRONG_SIGNAL:
             n_strong_contradict += 1
+        if s.support > MODERATE_SIGNAL:
+            n_moderate_support += 1
+        if s.contradict > MODERATE_SIGNAL:
+            n_moderate_contradict += 1
 
     if max_support < WEAK_SIGNAL and max_contradict < WEAK_SIGNAL:
         return ("unproven", best_snippet)
@@ -134,14 +161,42 @@ def label_claim(scores: list) -> tuple[str, str]:
         return ("mixture", best_snippet)
 
     if n_strong_support > 0 and n_strong_contradict == 0:
-        if max_contradict > WEAK_SIGNAL:
+        # Demote to "mostly" only when there's a *moderate-or-higher*
+        # opposing snippet. Below MODERATE_SIGNAL is NLI noise on the
+        # wrong axis — DeBERTa-base routinely produces 0.3–0.5
+        # contradiction values for cleanly true claims and we don't
+        # want that noise demoting definitive verdicts.
+        if max_contradict >= MODERATE_SIGNAL:
             return ("mostly true", best_snippet)
         return ("true", best_snippet)
 
     if n_strong_contradict > 0 and n_strong_support == 0:
-        if max_support > WEAK_SIGNAL:
+        if max_support >= MODERATE_SIGNAL:
             return ("mostly false", best_snippet)
         return ("false", best_snippet)
+
+    if n_moderate_support > 0 and n_moderate_contradict > 0:
+        if n_moderate_support >= 2 * n_moderate_contradict:
+            return ("mostly true", best_snippet)
+        if n_moderate_contradict >= 2 * n_moderate_support:
+            return ("mostly false", best_snippet)
+        return ("mixture", best_snippet)
+
+    if n_moderate_support > 0 and n_moderate_contradict == 0:
+        # No moderate-or-higher contradiction snippet exists by
+        # construction — what's left on the contradict side is NLI
+        # noise that wouldn't change a fact-checker's mind. Distinguish
+        # *redundant* moderate support (multiple snippets, definitive
+        # "true") from *single* moderate support ("mostly true"
+        # because there isn't enough redundancy to be definitive).
+        if n_moderate_support >= 2:
+            return ("true", best_snippet)
+        return ("mostly true", best_snippet)
+
+    if n_moderate_contradict > 0 and n_moderate_support == 0:
+        if n_moderate_contradict >= 2:
+            return ("false", best_snippet)
+        return ("mostly false", best_snippet)
 
     if max_support > max_contradict:
         return ("partially true", best_snippet)

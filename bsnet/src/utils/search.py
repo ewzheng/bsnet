@@ -65,10 +65,96 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # Per-snippet character cap applied after title+body concat. The NLI
 # scorer pads every snippet in a batch up to the longest one, so a
 # single 400-char outlier inflates the batched forward pass 3–4×.
-# Capping at 200 chars preserves the title and typically the first
-# sentence of the body — where entailment signal is densest — while
-# keeping padded-batch cost roughly flat across snippets.
-_MAX_SNIPPET_CHARS = 200
+# Capping preserves the title and the first sentence-or-two of the
+# body — where entailment signal is densest — while keeping the
+# padded-batch cost in check. 250 (up from 200) leaves enough room
+# for snippets like Britannica's "In a vacuum, the speed of light is
+# 299,792,458 metres per second" to keep the actual numerical value
+# inside the cap; at 200 the number would be cut off and DeBERTa
+# would lose the entailment signal.
+_MAX_SNIPPET_CHARS = 250
+
+# Stripped from the start of snippet bodies before composition. DDGS
+# prepends date stamps to many results — relative ("5 days ago - ",
+# "1 week ago · ") and absolute ("Oct 29, 2024 · ", "October 29,
+# 2024 - ") — that eat 10–20 chars of the per-snippet budget for
+# zero NLI value. Both `-` and `·` separators are observed.
+_DATE_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"\d+\s+(?:second|minute|hour|day|week|month|year)s?\s+ago"
+    r"|"
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*"
+    r"\s+\d{1,2},?\s+\d{4}"
+    r")\s*[\-·]\s*",
+    re.IGNORECASE,
+)
+
+# Markdown-stripping regexes applied to scraped bodies in
+# ``_strip_markdown``. Some wikis (e.g. OurBigBook) serve raw
+# markdown that DDGS scrapes verbatim — observed snippets included
+# bold delimiters, link syntax, and heading hashes leaking into the
+# premise. None carry semantic content for NLI and they waste
+# characters of the per-snippet budget; small NLI models can also be
+# confused by the markup.
+#
+# Order matters: image syntax must be matched before link syntax
+# (images are ``![alt](url)``, links are ``[text](url)``); fence /
+# delimiter characters are stripped after their wrappers so the
+# inner content survives.
+
+# ``![alt](url)`` — images. Drop entirely (NLI sees no image).
+_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+
+# ``[text](url)`` — links. Keep the visible text, drop the URL.
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+
+# ``<!-- ... -->`` — HTML comments. Drop entirely.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+# Line-prefix markers — heading hashes (``# X``), blockquote
+# carets (``> X``), horizontal rules (``---``/``***``), and list
+# markers (``- X`` / ``* X`` / ``1. X``). Stripped before character
+# delimiters so an unprefixed line emerges first.
+_MARKDOWN_HR_RE = re.compile(r"^[\-*_=]{3,}\s*$", re.MULTILINE)
+_MARKDOWN_HEADING_RE = re.compile(r"^#+\s*", re.MULTILINE)
+_MARKDOWN_BLOCKQUOTE_RE = re.compile(r"^>+\s*", re.MULTILINE)
+_MARKDOWN_LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+", re.MULTILINE)
+
+# Character delimiters — code fences, inline code, emphasis,
+# strikethrough. After running these the inner content remains as
+# plain prose.
+_MARKDOWN_CODE_FENCE_RE = re.compile(r"`+")
+_MARKDOWN_EMPHASIS_RE = re.compile(r"\*+")
+_MARKDOWN_STRIKE_RE = re.compile(r"~+")
+
+# When truncating to ``_MAX_SNIPPET_CHARS``, back off to the most
+# recent whitespace boundary to avoid cutting mid-word — but only
+# when the backoff distance is small. A pathological snippet with
+# no whitespace in the last 30 chars (rare, mostly URL-only bodies)
+# falls back to the original hard cut so we don't lose half the
+# snippet to backoff.
+_TRUNCATE_BACKOFF_CHARS = 30
+
+# Jaccard threshold over content tokens above which a snippet title
+# is considered a near-restatement of the claim and dropped before
+# concatenation with the body. DeBERTa-v3-base short-circuits when
+# the premise begins with the literal hypothesis, scoring entailment
+# ~1.0 even when the body refutes the claim — observed on the
+# "The Earth is flat" calibration case where Wikipedia titles like
+# "Flat Earth - Wikipedia" produced 0.78–0.99 support for a claim
+# the body explicitly denies. Stripping the redundant title forces
+# the scorer to read the actual evidence.
+_TITLE_CLAIM_OVERLAP_DROP = 0.6
+
+# Tokens shorter than this are treated as stopwords and ignored when
+# computing claim/title overlap. Catches "the", "is", "of", "to",
+# "in", "on", "a", "an" without maintaining an explicit list.
+_CONTENT_TOKEN_MIN_LEN = 3
+
+# Strip everything but lowercase letters, digits, and whitespace
+# before tokenizing. Numbers survive (so "299792" tokenizes cleanly
+# after the comma is stripped from "299,792").
+_TOKEN_NORMALIZE_RE = re.compile(r"[^a-z0-9 ]")
 
 # Sentence-embedding model used by the post-retrieval relevance
 # filter. MiniLM-L6-v2 is ~22M params, ~80MB on disk, and hits
@@ -98,6 +184,177 @@ _RELEVANCE_MIN_KEEP_FRAC = 0.5
 _embedder_lock = threading.Lock()
 _embedder_tokenizer: AutoTokenizer | None = None
 _embedder_model: AutoModel | None = None
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown formatting from scraped text.
+
+    Walks the regexes in dependency order: image syntax before link
+    syntax (images are a superset of link syntax); HTML comments;
+    line-prefix markers (HR / heading / blockquote / list); then
+    character delimiters (code fence / emphasis / strikethrough).
+    The result is plain prose with all formatting characters
+    removed and link / list / heading text preserved.
+
+    Args:
+        text: Possibly-markdown text.
+
+    Returns:
+        ``text`` with markdown delimiters removed and link / list /
+        heading content unwrapped.
+
+    Preconditions:
+        - ``text`` is a string.
+
+    Postconditions:
+        - Returned text contains no markdown emphasis (``*``,
+          ``~``), code fence (`` ` ``), heading-hash, blockquote-
+          caret, or list-marker characters in their markdown
+          contexts.
+        - Image and HTML-comment content is removed entirely.
+        - Link text is preserved without the URL.
+        - Does not mutate the input.
+    """
+    text = _MARKDOWN_IMAGE_RE.sub("", text)
+    text = _MARKDOWN_LINK_RE.sub(r"\1", text)
+    text = _HTML_COMMENT_RE.sub("", text)
+    text = _MARKDOWN_HR_RE.sub("", text)
+    text = _MARKDOWN_HEADING_RE.sub("", text)
+    text = _MARKDOWN_BLOCKQUOTE_RE.sub("", text)
+    text = _MARKDOWN_LIST_RE.sub("", text)
+    text = _MARKDOWN_CODE_FENCE_RE.sub("", text)
+    text = _MARKDOWN_EMPHASIS_RE.sub("", text)
+    text = _MARKDOWN_STRIKE_RE.sub("", text)
+    return text
+
+
+def _clean_body(body: str) -> str:
+    """Strip search-result noise from a snippet body before composition.
+
+    Removes DDGS-prepended date stamps and any markdown formatting.
+    Both are pure noise from the NLI scorer's perspective and waste
+    characters of the per-snippet truncation budget — every char
+    dropped here is a char of real content that survives the cap
+    downstream.
+
+    Args:
+        body: Raw snippet body returned by a search backend.
+
+    Returns:
+        The body with leading date stamps removed, markdown stripped
+        via ``_strip_markdown``, and leading/trailing whitespace
+        stripped.
+
+    Preconditions:
+        - ``body`` is a string.
+
+    Postconditions:
+        - Returned text does not start with a recognized DDGS date
+          prefix.
+        - Returned text contains no markdown formatting characters.
+        - Does not mutate the input.
+    """
+    cleaned = _DATE_PREFIX_RE.sub("", body, count=1)
+    cleaned = _strip_markdown(cleaned)
+    return cleaned.strip()
+
+
+def _truncate_to_word_boundary(text: str, max_chars: int) -> str:
+    """Truncate ``text`` to ``max_chars``, backing off to whitespace.
+
+    A hard cut at ``max_chars`` often lands mid-word ("approx" instead
+    of "approximately") — DeBERTa-base will hallucinate on the
+    fragment. Backing off to the most recent whitespace preserves the
+    last full word. We cap the backoff at
+    ``_TRUNCATE_BACKOFF_CHARS`` so a pathological no-whitespace
+    snippet doesn't lose half its content to backoff.
+
+    Args:
+        text: Text to truncate.
+        max_chars: Inclusive upper bound on returned length.
+
+    Returns:
+        ``text`` if it already fits; otherwise the largest prefix
+        not exceeding ``max_chars`` and ending at a whitespace
+        boundary (or hard-cut at ``max_chars`` when no whitespace is
+        within ``_TRUNCATE_BACKOFF_CHARS`` of the cut).
+
+    Preconditions:
+        - ``max_chars`` is a positive integer.
+
+    Postconditions:
+        - ``len(result) <= max_chars``.
+        - Returned text has no trailing whitespace.
+    """
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    last_space = truncated.rfind(" ")
+    if 0 < max_chars - last_space <= _TRUNCATE_BACKOFF_CHARS:
+        truncated = truncated[:last_space]
+    return truncated.rstrip()
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Return lowercase content-word tokens from ``text``.
+
+    Strips non-alphanumeric characters, lowercases, splits on
+    whitespace, and drops tokens shorter than
+    ``_CONTENT_TOKEN_MIN_LEN`` so common stopwords ("the", "is",
+    "of", "to") are filtered without maintaining an explicit list.
+
+    Args:
+        text: Arbitrary text.
+
+    Returns:
+        A set of normalized content tokens.
+
+    Preconditions:
+        - ``text`` is a string.
+
+    Postconditions:
+        - Every returned token is lowercase alphanumeric.
+        - Every returned token has length ``>= _CONTENT_TOKEN_MIN_LEN``.
+    """
+    cleaned = _TOKEN_NORMALIZE_RE.sub(" ", text.lower())
+    return {t for t in cleaned.split() if len(t) >= _CONTENT_TOKEN_MIN_LEN}
+
+
+def _title_restates_claim(claim_tokens: set[str], title: str) -> bool:
+    """Decide whether a snippet title is a near-restatement of the claim.
+
+    Uses Jaccard similarity over content tokens. When a title's
+    content tokens overlap with the claim's at or above
+    ``_TITLE_CLAIM_OVERLAP_DROP``, the title carries no new evidence
+    — it just restates the hypothesis with extra boilerplate (e.g.
+    "- Wikipedia"). Stripping such titles before scoring prevents
+    DeBERTa-base from short-circuiting on lexical overlap.
+
+    Args:
+        claim_tokens: Pre-computed content tokens of the claim,
+            shared across all titles in a single search call.
+        title: The candidate snippet title.
+
+    Returns:
+        ``True`` when the title should be dropped before scoring.
+
+    Preconditions:
+        - ``claim_tokens`` was produced by ``_content_tokens``.
+        - ``title`` is a string.
+
+    Postconditions:
+        - Returns ``False`` when ``title`` is empty after stripping.
+        - Returns ``False`` when either token set is empty.
+    """
+    title = title.strip()
+    if not title or not claim_tokens:
+        return False
+    title_tokens = _content_tokens(title)
+    if not title_tokens:
+        return False
+    intersection = claim_tokens & title_tokens
+    union = claim_tokens | title_tokens
+    return (len(intersection) / len(union)) >= _TITLE_CLAIM_OVERLAP_DROP
 
 
 def _get_embedder() -> tuple[AutoTokenizer, AutoModel]:
@@ -267,12 +524,27 @@ def get_search_snippets(
     if not backends:
         return []
 
+    claim_tokens = _content_tokens(query)
+
     def _compose(title: str, body: str) -> str:
-        """Concat title + body and truncate to the per-snippet char cap."""
-        text = f"{title}. {body}" if title else body
-        if len(text) > _MAX_SNIPPET_CHARS:
-            text = text[:_MAX_SNIPPET_CHARS].rstrip()
-        return text
+        """Concat title + body and truncate to the per-snippet char cap.
+
+        Strips search-result noise (date prefixes, markdown markers)
+        from the body before concatenation, then truncates at a word
+        boundary so the NLI scorer never sees a fragment like
+        "approx" mid-word. When the title's content tokens overlap
+        heavily with the claim's, the title is dropped before
+        concatenation — see ``_TITLE_CLAIM_OVERLAP_DROP`` for the
+        rationale.
+        """
+        body = _clean_body(body)
+        if title and _title_restates_claim(claim_tokens, title):
+            text = body
+        elif title:
+            text = f"{title}. {body}"
+        else:
+            text = body
+        return _truncate_to_word_boundary(text, _MAX_SNIPPET_CHARS)
 
     def _search_ddgs(single_backend: str) -> list[str]:
         """Run a DDGS search against one backend and extract title+body."""

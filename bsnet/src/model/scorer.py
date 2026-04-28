@@ -5,11 +5,40 @@ API, scores each (claim, snippet) pair for entailment / contradiction /
 neutral, and returns all results for downstream aggregation.
 """
 
+import os
+
 import torch
 from transformers import BitsAndBytesConfig
 
 from bsnet.src.model._common import SCORER_MODEL, load_model
 from bsnet.src.utils.outputs import EvidenceScore, ScoredClaim
+
+# Env-var override for the ``quantize`` constructor default. Set to
+# ``"0"`` / ``"false"`` / ``"no"`` to load fp32 weights instead of
+# bnb int8. Useful when bitsandbytes' backend autodetection picks a
+# binary that doesn't ship for the host (e.g. ROCm-flavored torch on
+# Windows triggers a search for ``libbitsandbytes_rocm*.dll`` that
+# bnb doesn't publish for Windows). Mirrors the ``BSNET_GPU_LAYERS``
+# pattern used by ``load_llm`` for llama-cpp GPU offload.
+_QUANTIZE_ENV_VAR = "BSNET_QUANTIZE_SCORER"
+_QUANTIZE_DISABLE_VALUES = frozenset({"0", "false", "no"})
+
+
+def _resolve_quantize_default() -> bool:
+    """Resolve the default ``quantize`` flag from the environment.
+
+    Returns:
+        ``False`` when ``BSNET_QUANTIZE_SCORER`` is set to a disable
+        value; ``True`` otherwise.
+
+    Preconditions:
+        - None.
+
+    Postconditions:
+        - Reads ``os.environ`` but does not mutate it.
+    """
+    raw = os.environ.get(_QUANTIZE_ENV_VAR, "").strip().lower()
+    return raw not in _QUANTIZE_DISABLE_VALUES if raw else True
 
 
 class Scorer:
@@ -32,7 +61,7 @@ class Scorer:
         self,
         model_name: str = SCORER_MODEL,
         device: str = "auto",
-        quantize: bool = True,
+        quantize: bool | None = None,
     ) -> None:
         """Load the NLI cross-encoder model and tokenizer.
 
@@ -45,7 +74,10 @@ class Scorer:
         pipeline's bottleneck stage under steady-state load, so
         shrinking its per-claim cost directly widens saturated
         throughput. Pass ``quantize=False`` for reference full-
-        precision inference (e.g. to A/B the speed/quality tradeoff).
+        precision inference (e.g. to A/B the speed/quality tradeoff)
+        or set the ``BSNET_QUANTIZE_SCORER=0`` env var when bnb's
+        backend autodetect breaks (e.g. ROCm-flavored torch on
+        Windows). Explicit constructor args win over the env var.
 
         Args:
             model_name: HuggingFace model identifier to load.
@@ -54,19 +86,24 @@ class Scorer:
                 Ignored when ``quantize`` is true — bitsandbytes
                 owns placement.
             quantize: When true, load with LLM.int8() quantization.
+                ``None`` (the default) defers to the
+                ``BSNET_QUANTIZE_SCORER`` env var, which itself
+                defaults to true when unset.
 
         Preconditions:
             - ``model_name`` is a valid HuggingFace NLI model identifier
               with 3-class output (contradiction, entailment, neutral).
-            - When ``quantize`` is true, ``bitsandbytes`` and
-              ``accelerate`` are installed.
+            - When the resolved ``quantize`` is true, ``bitsandbytes``
+              and ``accelerate`` are installed.
 
         Postconditions:
             - The model and tokenizer are loaded and ready for inference.
             - The model is set to eval mode.
-            - When ``quantize`` is true, ``nn.Linear`` layers have
+            - When quantization is active, ``nn.Linear`` layers have
               been replaced with ``Linear8bitLt``.
         """
+        if quantize is None:
+            quantize = _resolve_quantize_default()
         quantization_config = (
             BitsAndBytesConfig(load_in_8bit=True) if quantize else None
         )
