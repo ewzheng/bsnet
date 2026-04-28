@@ -6,6 +6,7 @@ inference logic. Supports both HuggingFace transformers models
 and GGUF models via llama-cpp-python.
 """
 
+import os
 import re
 
 import torch
@@ -20,7 +21,7 @@ from transformers import (
 # ── Default model identifiers ────────────────────────────────────────────────
 EXTRACTOR_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 EXTRACTOR_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
-SCORER_MODEL = "cross-encoder/nli-deberta-v3-base"
+SCORER_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
 RENDERER_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 RENDERER_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
 
@@ -50,14 +51,34 @@ SAMPLING_NON_THINKING = {
 # Regex to strip <think>...</think> blocks from model output
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+# ── NLI aggregation thresholds ───────────────────────────────────────────────
+# Shared by ``label_claim`` (for labeling) and the pipeline's evidence
+# summary (for post-hoc display). Keep these in one place so tuning
+# the labeler automatically retunes the summary too.
+STRONG_SIGNAL = 0.9
+WEAK_SIGNAL = 0.3
+
 
 def label_claim(scores: list) -> tuple[str, str]:
     """Aggregate NLI scores across all evidence snippets into a verdict.
 
-    Uses a hybrid max-pool and count-based approach: peak signal strength
-    determines whether evidence crosses confidence thresholds, while counts
-    of strongly-signaling snippets detect mixed evidence. Also returns the
-    most relevant snippet for the renderer.
+    Uses three pooling signals in layered order:
+
+    1. **Max pooling** on ``support`` and ``contradict`` gates the
+       coarse categories. When the strongest score in either direction
+       is below ``WEAK_SIGNAL`` the claim is "unproven" — evidence
+       didn't meaningfully support or contradict it.
+    2. **Count pooling** of strong-signal snippets (those above
+       ``STRONG_SIGNAL``) catches cases with any confident evidence.
+    3. **Ratio-aware logic** between the two counts decides between
+       "mostly true", "mixture", and "mostly false" when *both*
+       directions have strong snippets: a 2:1 ratio or better in either
+       direction tilts toward "mostly" rather than "mixture". This
+       keeps a single noisy-contradict snippet from flipping a
+       confidently supported claim all the way to "mixture".
+
+    Also returns the most relevant snippet for the renderer (the one
+    with the strongest non-neutral signal).
 
     Args:
         scores: A list of ``EvidenceScore`` objects from the scorer.
@@ -66,9 +87,8 @@ def label_claim(scores: list) -> tuple[str, str]:
         A tuple of ``(label, best_snippet)`` where label is one of
         ``"true"``, ``"mostly true"``, ``"partially true"``,
         ``"mixture"``, ``"partially false"``, ``"mostly false"``,
-        ``"false"``, ``"unproven"``, or ``"opinion"``, and
-        ``best_snippet`` is the snippet text with the strongest
-        non-neutral signal.
+        ``"false"``, or ``"unproven"``, and ``best_snippet`` is the
+        snippet text with the strongest non-neutral signal.
 
     Preconditions:
         - ``scores`` is a non-empty list of ``EvidenceScore`` objects.
@@ -76,7 +96,7 @@ def label_claim(scores: list) -> tuple[str, str]:
           ``contradict`` (float), and ``neutral`` (float) attributes.
 
     Postconditions:
-        - Returns exactly one of the nine label strings.
+        - Returns exactly one of the eight label strings.
         - ``best_snippet`` is always a non-empty string from the input.
         - ``scores`` is not mutated.
     """
@@ -98,26 +118,28 @@ def label_claim(scores: list) -> tuple[str, str]:
         if s.contradict > max_contradict:
             max_contradict = s.contradict
 
-        if s.support > 0.9:
+        if s.support > STRONG_SIGNAL:
             n_strong_support += 1
-        if s.contradict > 0.9:
+        if s.contradict > STRONG_SIGNAL:
             n_strong_contradict += 1
 
-    if max_support < 0.1 and max_contradict < 0.1:
-        return ("opinion", best_snippet)
-    if max_support < 0.3 and max_contradict < 0.3:
+    if max_support < WEAK_SIGNAL and max_contradict < WEAK_SIGNAL:
         return ("unproven", best_snippet)
 
     if n_strong_support > 0 and n_strong_contradict > 0:
+        if n_strong_support >= 2 * n_strong_contradict:
+            return ("mostly true", best_snippet)
+        if n_strong_contradict >= 2 * n_strong_support:
+            return ("mostly false", best_snippet)
         return ("mixture", best_snippet)
 
     if n_strong_support > 0 and n_strong_contradict == 0:
-        if max_contradict > 0.3:
+        if max_contradict > WEAK_SIGNAL:
             return ("mostly true", best_snippet)
         return ("true", best_snippet)
 
     if n_strong_contradict > 0 and n_strong_support == 0:
-        if max_support > 0.3:
+        if max_support > WEAK_SIGNAL:
             return ("mostly false", best_snippet)
         return ("false", best_snippet)
 
@@ -133,6 +155,12 @@ def load_llm(
 ) -> Llama:
     """Load a GGUF model via llama-cpp-python.
 
+    Reads ``BSNET_GPU_LAYERS`` from the environment to control GPU
+    offload. Set it to ``-1`` to offload every layer to GPU (requires
+    a CUDA / Metal / ROCm build of ``llama-cpp-python``), or a positive
+    integer to offload that many layers. Defaults to ``0`` (CPU only),
+    preserving the original behavior.
+
     Args:
         repo: HuggingFace repo ID containing the GGUF file.
         gguf_file: Name of the GGUF file within the repo.
@@ -144,14 +172,20 @@ def load_llm(
     Preconditions:
         - ``repo`` is a valid HuggingFace repo with GGUF files.
         - ``gguf_file`` exists in the repo.
+        - ``BSNET_GPU_LAYERS``, if set, is a valid integer.
 
     Postconditions:
         - The model is loaded and ready for chat completion calls.
+        - Layers are offloaded per ``BSNET_GPU_LAYERS`` when the
+          installed ``llama-cpp-python`` supports the target backend;
+          ignored on a CPU-only build.
     """
+    n_gpu_layers = int(os.environ.get("BSNET_GPU_LAYERS", "0"))
     return Llama.from_pretrained(
         repo,
         filename=gguf_file,
         n_ctx=n_ctx,
+        n_gpu_layers=n_gpu_layers,
         verbose=False,
     )
 
@@ -211,10 +245,18 @@ def load_model(
     model_name: str,
     task: str = "seq2seq",
     device: str = "auto",
+    quantization_config: object | None = None,
 ) -> tuple:
     """Load a HuggingFace transformers model and tokenizer.
 
     For GGUF models, use ``load_llm`` instead.
+
+    When ``quantization_config`` is supplied, it's forwarded to
+    ``from_pretrained`` — the transformers integration handles device
+    placement and the explicit ``model.to(device)`` call is skipped
+    because quantized weights are already placed by the quantization
+    backend (e.g. bitsandbytes dispatches to CUDA, XPU, or CPU based
+    on runtime detection and the config's settings).
 
     Args:
         model_name: HuggingFace model identifier to load.
@@ -223,10 +265,17 @@ def load_model(
             ``"classification"`` for encoder models (NLI, BERT).
         device: ``"auto"`` to detect the best available device,
             or an explicit device string (``"cpu"``, ``"cuda"``).
+            Ignored when ``quantization_config`` is provided.
+        quantization_config: Optional ``BitsAndBytesConfig`` (or any
+            other HF quantization config) to pass through to
+            ``from_pretrained``. ``None`` (the default) loads full
+            precision.
 
     Returns:
         A tuple of ``(tokenizer, model, device_str)`` ready for
-        inference.
+        inference. ``device_str`` is the resolved device string for
+        full-precision loads; for quantized loads it reflects where
+        the quantized backend placed the weights.
 
     Raises:
         ValueError: If ``task`` is not a recognized value.
@@ -237,22 +286,33 @@ def load_model(
           ``"classification"``.
 
     Postconditions:
-        - The model is in eval mode and placed on the resolved device.
+        - The model is in eval mode.
+        - For full-precision loads, the model is placed on the
+          resolved device.
+        - For quantized loads, placement is owned by the quantization
+          backend.
         - The tokenizer matches the model architecture.
     """
     resolved = resolve_device(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    load_kwargs: dict = {}
+    if quantization_config is not None:
+        load_kwargs["quantization_config"] = quantization_config
+
     if task == "seq2seq":
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, **load_kwargs)
     elif task == "causal":
-        model = AutoModelForCausalLM.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
     elif task == "classification":
-        model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name, **load_kwargs,
+        )
     else:
         raise ValueError(f"Unknown task: {task!r}. Use 'seq2seq', 'causal', or 'classification'.")
 
-    model.to(resolved)
+    if quantization_config is None:
+        model.to(resolved)
     model.eval()
     return tokenizer, model, resolved
 

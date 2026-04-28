@@ -23,7 +23,9 @@ def test_factual_sentence_returns_claims(extractor: Extractor) -> None:
     """Verify that a clearly factual sentence produces at least one claim.
 
     Postconditions:
-        - Returns at least one ``Claim`` with non-empty text and queries.
+        - Returns at least one ``Claim`` with non-empty text. ``queries``
+          is always empty under the single-pass extractor — the search
+          layer uses the claim text directly.
     """
     claims = extractor.extract(
         "The unemployment rate dropped to 3.4% in January 2023, "
@@ -32,13 +34,10 @@ def test_factual_sentence_returns_claims(extractor: Extractor) -> None:
     print(f"\n--- factual sentence ---")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
     for claim in claims:
         assert claim.text.strip()
-        assert len(claim.queries) >= 1
-        assert claim.queries[0].strip()
 
 
 def test_opinion_sentence_may_return_empty(extractor: Extractor) -> None:
@@ -60,7 +59,6 @@ def test_opinion_sentence_may_return_empty(extractor: Extractor) -> None:
     print(f"  claims returned: {len(claims)}")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     for claim in claims:
         assert claim.text.strip()
@@ -80,7 +78,6 @@ def test_compound_sentence_may_split(extractor: Extractor) -> None:
     print(f"  claims returned: {len(claims)}")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
 
@@ -97,12 +94,10 @@ def test_named_entity_claim(extractor: Extractor) -> None:
     print(f"\n--- named entity ---")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
     for claim in claims:
         assert claim.text.strip()
-        assert len(claim.queries) >= 1
 
 
 def test_political_claim(extractor: Extractor) -> None:
@@ -114,11 +109,8 @@ def test_political_claim(extractor: Extractor) -> None:
     print(f"\n--- political claim ---")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
-    for claim in claims:
-        assert len(claim.queries) >= 1
 
 
 # ── Science and health claims ────────────────────────────────────────────────
@@ -133,7 +125,6 @@ def test_scientific_claim(extractor: Extractor) -> None:
     print(f"\n--- scientific claim ---")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
 
@@ -147,11 +138,8 @@ def test_health_claim(extractor: Extractor) -> None:
     print(f"\n--- health claim ---")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
-    for claim in claims:
-        assert len(claim.queries) >= 1
 
 
 # ── Multi-sentence and paragraph inputs ──────────────────────────────────────
@@ -168,7 +156,6 @@ def test_multi_sentence_paragraph(extractor: Extractor) -> None:
     print(f"  claims returned: {len(claims)}")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 2
 
@@ -184,7 +171,6 @@ def test_mixed_fact_and_opinion(extractor: Extractor) -> None:
     print(f"  claims returned: {len(claims)}")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
 
@@ -199,7 +185,6 @@ def test_short_factual_fragment(extractor: Extractor) -> None:
     print(f"  claims returned: {len(claims)}")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
 
@@ -235,7 +220,6 @@ def test_historical_claim(extractor: Extractor) -> None:
     print(f"\n--- historical claim ---")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
 
@@ -249,7 +233,6 @@ def test_sports_claim(extractor: Extractor) -> None:
     print(f"\n--- sports claim ---")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
 
@@ -263,7 +246,6 @@ def test_geographic_claim(extractor: Extractor) -> None:
     print(f"\n--- geographic claim ---")
     for c in claims:
         print(f"  claim: {c.text}")
-        print(f"  queries: {c.queries}")
 
     assert len(claims) >= 1
 
