@@ -1,12 +1,9 @@
 name: bsnet
 channels:
   - conda-forge
-  - pytorch
   - defaults
 dependencies:
   - python>=3.11
-  - pytorch::pytorch
-  - pytorch::torchaudio
   - numpy
   - pip
   - pip:
@@ -17,3 +14,8 @@ dependencies:
       - tiktoken
       - webrtcvad-wheels
       - pytest
+      - ddgs
+      - torch
+      - torchaudio
+      - bitsandbytes
+      - accelerate

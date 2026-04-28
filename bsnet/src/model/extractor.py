@@ -1,8 +1,9 @@
 """Claim extractor powered by Qwen3.5 via llama-cpp-python.
 
-Two-pass extraction: the first call pulls factual claims from a
-sentence, the second generates search keywords for each claim.
-Uses thinking mode for deeper reasoning about claim identification.
+Single-pass extraction: pulls factual claims from a sentence and
+leaves search-query assembly to the orchestrator (which sends the
+claim text directly to the search backend). Uses thinking mode for
+deeper reasoning about claim identification.
 """
 
 from bsnet.src.model._common import (
@@ -43,17 +44,29 @@ class Extractor:
         """
         self._model = load_llm(repo, gguf_file, n_ctx=n_ctx)
 
-    def extract(self, text: str) -> list[Claim]:
-        """Run two-pass extraction on an input string.
+    def extract(self, text: str, context: str = "") -> list[Claim]:
+        """Run single-pass claim extraction on an input string.
 
-        Pass 1 (thinking mode) asks the model to identify factual
-        claims in the text. Pass 2 generates search keywords for each
-        claim. If pass 1 returns nothing, the sentence has no
-        checkworthy claims and an empty list is returned.
+        Asks the model (in thinking mode) to identify factual claims
+        in the text and emit one per line. Returns a ``Claim`` per
+        emitted line; the downstream search layer uses the claim text
+        itself as the search query, which is both faster (no second
+        LLM call) and more reliable (key specifics like numbers and
+        dates can't be dropped by a flaky keyword-generation pass).
+
+        When ``context`` is non-empty, the prompt is reshaped to ask
+        the model to extract facts from ``text`` only, using the
+        preceding context solely to resolve pronouns and implicit
+        references. This keeps ambiguous sentences like
+        ``"It was the largest ever recorded"`` from yielding
+        ungrounded claims that send the search stage chasing
+        irrelevant topics.
 
         Args:
-            text: The fully formatted input string, assembled by the
-                orchestrator (may include topic, context, and sentence).
+            text: The fully formatted input string — the current
+                sentence to extract claims from.
+            context: Concatenated prior sentences from the transcript
+                buffer. Empty string means no context is available.
 
         Returns:
             A list of ``Claim`` objects. Empty if no factual claims
@@ -65,37 +78,62 @@ class Extractor:
 
         Postconditions:
             - Does not mutate the model or input.
-            - Each returned ``Claim`` has at least one query string.
+            - Each returned ``Claim`` has a non-empty ``text``.
         """
+        context = context.strip()
+        if context:
+            prompt = (
+                "Extract each checkable fact from the latest sentence. "
+                "Use the preceding context only to resolve pronouns and "
+                "implicit references — do not extract facts that appear "
+                "only in the context. Write each as a full sentence with "
+                "its subject explicitly named, one per line. If one "
+                "sentence joins multiple facts with \"and\", \"but\", "
+                "\"while\", or a comma, split them into separate lines — "
+                "even when the facts share a subject or a time phrase. "
+                "Do not write fragments or bare numbers. Exclude "
+                "opinions. Say \"none\" if there are no facts.\n\n"
+                f"Context: {context}\n"
+                f"Latest: {text}\n"
+                "Facts:\n"
+                "{fact1}\n"
+                "{fact2}"
+            )
+        else:
+            prompt = (
+                "Extract each checkable fact from the text below. Write "
+                "each as a full sentence with its subject explicitly "
+                "named, one per line. If one sentence joins multiple "
+                "facts with \"and\", \"but\", \"while\", or a comma, "
+                "split them into separate lines — even when the facts "
+                "share a subject or a time phrase. Do not write "
+                "fragments or bare numbers. Exclude opinions. Say "
+                "\"none\" if there are no facts.\n\n"
+                f"Text: {text}\n"
+                "Facts:\n"
+                "{fact1}\n"
+                "{fact2}"
+            )
         raw_claims = generate_llm(
             self._model,
-            "Extract each checkable fact from this text. Write each as "
-            "a full sentence with its subject, one per line. Do not "
-            "write sentence fragments or bare numbers. Exclude opinions. "
-            f"Say \"none\" if there are no facts.\n\n{text}",
+            prompt,
             thinking=True,
             max_tokens=256,
             temperature=0.3,
         )
-        if not raw_claims.strip() or raw_claims.strip().lower() == "none":
+        body = raw_claims.strip()
+        if body.lower().startswith("facts:"):
+            body = body[len("facts:"):].strip()
+        if not body or body.lower() == "none":
             return []
 
         claims: list[Claim] = []
-        for claim_text in raw_claims.strip().splitlines():
+        for claim_text in body.splitlines():
             claim_text = claim_text.strip().lstrip("0123456789.-) ")
-            if not claim_text:
+            if not claim_text or claim_text.lower() == "none":
                 continue
-            query = generate_llm(
-                self._model,
-                "Topic and keywords for this claim, comma-separated."
-                f"\n\n{claim_text}",
-                thinking=False,
-                max_tokens=64,
-                temperature=0.0,
-            )
-            query = query.strip()
-            if not query:
+            if claim_text.lower() in ("facts:", "{fact1}", "{fact2}"):
                 continue
-            claims.append(Claim(text=claim_text, queries=[query]))
+            claims.append(Claim(text=claim_text))
 
         return claims

@@ -11,12 +11,11 @@ from dataclasses import dataclass
 class Claim:
     """A single factual claim extracted from a transcript sentence.
 
-    Holds the normalized claim text and a set of search queries
-    intended for the downstream search API.
+    Holds the normalized claim text. The search layer uses this text
+    directly as the search query, so no separate query field is needed.
     """
 
     text: str
-    queries: list[str]
 
 
 @dataclass
