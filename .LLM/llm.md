@@ -125,4 +125,9 @@ communicate status. See that file for the update format.
 - Config: `pytest.ini` at root, `environment.yml` for conda.
 - Environment variables:
   - `BSNET_GPU_LAYERS` — GGUF layers to offload to GPU (default `0`, CPU only).
+  - `BSNET_QUANTIZE_SCORER` — set to `0` / `false` / `no` to load the
+    NLI scorer in fp32 instead of bnb int8. Use when `bitsandbytes`
+    backend autodetect picks a binary that doesn't ship for the host
+    (e.g. ROCm-flavored torch on Windows tries to load
+    `libbitsandbytes_rocm*.dll`, which bnb doesn't publish for Windows).
   - `KMP_DUPLICATE_LIB_OK` — Windows OpenMP conflict workaround.
