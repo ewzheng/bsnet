@@ -110,7 +110,12 @@ def main(chunk_source: Iterable[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+def run() -> int:
+    """Console-script entry point: open the mic and run the pipeline."""
     from bsnet.src.utils.transcription import listen
 
-    raise SystemExit(main(listen()))
+    return main(listen())
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

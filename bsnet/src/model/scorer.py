@@ -15,30 +15,46 @@ from bsnet.src.utils.outputs import EvidenceScore, ScoredClaim
 
 # Env-var override for the ``quantize`` constructor default. Set to
 # ``"0"`` / ``"false"`` / ``"no"`` to load fp32 weights instead of
-# bnb int8. Useful when bitsandbytes' backend autodetection picks a
-# binary that doesn't ship for the host (e.g. ROCm-flavored torch on
-# Windows triggers a search for ``libbitsandbytes_rocm*.dll`` that
-# bnb doesn't publish for Windows). Mirrors the ``BSNET_GPU_LAYERS``
+# bnb int8, or ``"1"`` / ``"true"`` / ``"yes"`` to force int8 even
+# when auto-detection would skip it. Mirrors the ``BSNET_GPU_LAYERS``
 # pattern used by ``load_llm`` for llama-cpp GPU offload.
 _QUANTIZE_ENV_VAR = "BSNET_QUANTIZE_SCORER"
 _QUANTIZE_DISABLE_VALUES = frozenset({"0", "false", "no"})
+_QUANTIZE_ENABLE_VALUES = frozenset({"1", "true", "yes"})
 
 
 def _resolve_quantize_default() -> bool:
     """Resolve the default ``quantize`` flag from the environment.
 
+    When ``BSNET_QUANTIZE_SCORER`` is set, the explicit value wins.
+    When unset, defaults to ``True`` (bnb int8) on CUDA / CPU and
+    ``False`` on ROCm. ROCm auto-disables because bitsandbytes' 8-bit
+    kernel coverage on AMD GPUs is patchy — the load nominally
+    succeeds but commonly dispatches to CPU under the hood, slower
+    than just running fp32 on GPU. Detecting via ``torch.version.hip``
+    catches the ROCm-flavored torch wheel directly. The same
+    detection also catches ROCm-flavored torch on Windows where bnb
+    looks for a ``libbitsandbytes_rocm*.dll`` it doesn't publish.
+
     Returns:
-        ``False`` when ``BSNET_QUANTIZE_SCORER`` is set to a disable
-        value; ``True`` otherwise.
+        ``False`` when the env var is set to a disable value or when
+        unset on a ROCm torch build; ``True`` otherwise.
 
     Preconditions:
         - None.
 
     Postconditions:
         - Reads ``os.environ`` but does not mutate it.
+        - Returns the explicit env value when set, ignoring auto-
+          detection.
     """
     raw = os.environ.get(_QUANTIZE_ENV_VAR, "").strip().lower()
-    return raw not in _QUANTIZE_DISABLE_VALUES if raw else True
+    if raw in _QUANTIZE_DISABLE_VALUES:
+        return False
+    if raw in _QUANTIZE_ENABLE_VALUES:
+        return True
+    # Unset: auto-disable on ROCm where bnb 8-bit support is unreliable.
+    return torch.version.hip is None
 
 
 class Scorer:

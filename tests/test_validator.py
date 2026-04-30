@@ -157,18 +157,19 @@ def test_invalid_score_raises_value_error(validator: Validator) -> None:
 
 @pytest.mark.parametrize(
     "label",
-    ["mixture", "unproven", "partially true", "partially false"],
+    ["mixture", "partially true", "partially false"],
 )
-def test_uncertain_labels_pass_through(
+def test_borderline_directional_labels_pass_through(
     validator: Validator, label: str,
 ) -> None:
-    """Labels the labeler used to signal nuance reach the renderer.
+    """Borderline-but-directional labels reach the renderer.
 
-    Mixture / unproven / partially X are valid user-facing verdicts —
-    the renderer carries dedicated emojis (〰️ / ❓ / 🟡 / 🟠) for each
-    so the user sees the labeler's nuance directly. The validator's
-    job is to catch hallucination on definitive labels, not to drop
-    every label below "definitive."
+    Mixture / partially X carry real directional NLI signal — the
+    labeler's way of saying "the verdict is real but borderline." The
+    renderer carries dedicated emojis (〰️ / 🟡 / 🟠) for each so the
+    user sees the labeler's nuance directly. The validator's job is to
+    catch hallucination on definitive labels, not to drop every label
+    below "definitive."
 
     Preconditions:
         - ``validator`` fixture is loaded.
@@ -184,6 +185,31 @@ def test_uncertain_labels_pass_through(
         EvidenceScore(snippet="B", support=0.40, contradict=0.40, neutral=0.20),
     ]
     assert validator.evaluate_check_result(_result(label, scores)) is True
+
+
+def test_unproven_label_drops(validator: Validator) -> None:
+    """``"unproven"`` drops at the validator.
+
+    By definition no snippet has meaningful directional NLI signal
+    when the labeler returns ``"unproven"`` — both ``max_support`` and
+    ``max_contradict`` are below ``WEAK_SIGNAL``. The renderer would
+    still paraphrase the strongest-of-weak snippet under a forced
+    ``"rated unproven because"`` template, producing a confident
+    explanation grounded in noise. Dropping at the validator skips
+    render entirely.
+
+    Preconditions:
+        - ``validator`` fixture is loaded.
+
+    Postconditions:
+        - Asserts the validator drops the result regardless of the
+          underlying score distribution.
+    """
+    scores = [
+        EvidenceScore(snippet="A", support=0.20, contradict=0.10, neutral=0.70),
+        EvidenceScore(snippet="B", support=0.10, contradict=0.20, neutral=0.70),
+    ]
+    assert validator.evaluate_check_result(_result("unproven", scores)) is False
 
 
 def test_no_evidence_label_drops(validator: Validator) -> None:
@@ -225,14 +251,16 @@ def test_unknown_label_drops(validator: Validator) -> None:
 # ── Hard fail on opposing peak ──────────────────────────────────────────────
 
 
-def test_positive_label_hard_fails_on_strong_opposing_peak(
+def test_definitive_true_hard_fails_on_strong_opposing_peak(
     validator: Validator,
 ) -> None:
-    """A positive label drops when any single snippet contradicts hard.
+    """A definitive ``"true"`` drops when any single snippet contradicts hard.
 
     A 0.95 contradict snippet is enough to distrust the labeler's
-    "true"/"mostly true" verdict no matter what the rest of the
-    distribution looks like.
+    ``"true"`` verdict no matter what the rest of the distribution
+    looks like — a definitive label means the labeler claimed
+    *no* significant opposing signal exists, so a strong opposing
+    peak indicates the labeler missed something major.
 
     Preconditions:
         - ``validator`` fixture is loaded.
@@ -250,13 +278,13 @@ def test_positive_label_hard_fails_on_strong_opposing_peak(
     assert validator.evaluate_check_result(_result("true", scores)) is False
 
 
-def test_negative_label_hard_fails_on_strong_opposing_peak(
+def test_definitive_false_hard_fails_on_strong_opposing_peak(
     validator: Validator,
 ) -> None:
-    """A negative label drops when any single snippet supports hard.
+    """A definitive ``"false"`` drops when any single snippet supports hard.
 
-    Mirror of the positive case: a 0.95 support snippet against a
-    "false"/"mostly false" label is enough to distrust the labeler.
+    Mirror of the ``"true"`` case: a 0.95 support snippet against a
+    ``"false"`` label is enough to distrust the labeler.
 
     Preconditions:
         - ``validator`` fixture is loaded.
@@ -274,54 +302,111 @@ def test_negative_label_hard_fails_on_strong_opposing_peak(
     assert validator.evaluate_check_result(_result("false", scores)) is False
 
 
-# ── Redundancy gate ─────────────────────────────────────────────────────────
-
-
-def test_single_aligned_snippet_drops_for_lack_of_redundancy(
+def test_mostly_true_passes_with_strong_opposing_peak(
     validator: Validator,
 ) -> None:
-    """One moderate supporting snippet is not enough to surface "true".
+    """``"mostly true"`` survives a strong opposing peak.
 
-    Catches cherry-picked one-sided claims that the extractor missed —
-    e.g. subjective claims like "Technology is harmful to society"
-    where one moderately-supportive blog post lands but the rest of
-    the snippets are neutral. The single-aligned-pass alt path
-    (``SINGLE_ALIGNED_PASS``) requires a *near-certain* peak (≥ 0.90)
-    to substitute for redundancy, so a 0.78 peak alone still drops.
+    The ``mostly *`` qualifier explicitly encodes the labeler's
+    acknowledgment that opposing signal exists. Re-checking for an
+    opposing peak there double-counts the labeler's own concession;
+    AVeriTeC eval showed this was costing real verdicts where a
+    fact-check article quoting the claim verbatim drove
+    ``max_contradict`` above the hard-fail threshold even though the
+    labeler had already weighted contradict by count.
 
     Preconditions:
         - ``validator`` fixture is loaded.
 
     Postconditions:
-        - Asserts the validator drops the result.
+        - Asserts the validator passes the result.
+    """
+    scores = [
+        EvidenceScore(snippet="A", support=0.85, contradict=0.10, neutral=0.05),
+        EvidenceScore(snippet="B", support=0.80, contradict=0.10, neutral=0.10),
+        EvidenceScore(
+            snippet="Counter", support=0.02, contradict=0.95, neutral=0.03,
+        ),
+    ]
+    assert validator.evaluate_check_result(_result("mostly true", scores)) is True
+
+
+def test_mostly_false_passes_with_strong_opposing_peak(
+    validator: Validator,
+) -> None:
+    """``"mostly false"`` survives a strong opposing peak.
+
+    Mirror of the ``"mostly true"`` case. The validator trusts the
+    labeler's mixture-aware verdict rather than dropping on a single
+    strong support snippet.
+
+    Preconditions:
+        - ``validator`` fixture is loaded.
+
+    Postconditions:
+        - Asserts the validator passes the result.
+    """
+    scores = [
+        EvidenceScore(snippet="A", support=0.05, contradict=0.85, neutral=0.10),
+        EvidenceScore(snippet="B", support=0.10, contradict=0.80, neutral=0.10),
+        EvidenceScore(
+            snippet="Counter", support=0.95, contradict=0.02, neutral=0.03,
+        ),
+    ]
+    assert validator.evaluate_check_result(_result("mostly false", scores)) is True
+
+
+# ── Redundancy gate ─────────────────────────────────────────────────────────
+
+
+def test_single_moderate_aligned_snippet_passes(
+    validator: Validator,
+) -> None:
+    """One moderate supporting snippet now surfaces "true".
+
+    With ``MIN_ALIGNED_REDUNDANCY = 1`` (lowered after AVeriTeC eval
+    showed the previous 2-snippet floor over-pruned real refutations),
+    a single snippet above ``MODERATE_SIGNAL`` on the aligned axis is
+    sufficient redundancy. The hard-fail opposing-peak check still
+    catches the worst cherry-pick case (strong contrary signal that
+    the labeler missed); without that, the validator now trusts the
+    labeler's directional verdict.
+
+    Preconditions:
+        - ``validator`` fixture is loaded.
+
+    Postconditions:
+        - Asserts the validator passes the result.
     """
     scores = [
         EvidenceScore(snippet="A", support=0.78, contradict=0.03, neutral=0.19),
         EvidenceScore(snippet="B", support=0.10, contradict=0.05, neutral=0.85),
         EvidenceScore(snippet="C", support=0.15, contradict=0.04, neutral=0.81),
     ]
-    assert validator.evaluate_check_result(_result("true", scores)) is False
+    assert validator.evaluate_check_result(_result("true", scores)) is True
 
 
-def test_single_aligned_contradict_drops_for_lack_of_redundancy(
+def test_single_moderate_aligned_contradict_passes(
     validator: Validator,
 ) -> None:
-    """One moderate contradicting snippet is not enough to surface "false".
+    """One moderate contradicting snippet now surfaces "false".
 
-    Mirror redundancy check on the contradict axis.
+    Mirror of the support-axis redundancy relaxation: a single
+    snippet above ``MODERATE_SIGNAL`` on the contradict axis is
+    sufficient under ``MIN_ALIGNED_REDUNDANCY = 1``.
 
     Preconditions:
         - ``validator`` fixture is loaded.
 
     Postconditions:
-        - Asserts the validator drops the result.
+        - Asserts the validator passes the result.
     """
     scores = [
         EvidenceScore(snippet="A", support=0.03, contradict=0.78, neutral=0.19),
         EvidenceScore(snippet="B", support=0.10, contradict=0.10, neutral=0.80),
         EvidenceScore(snippet="C", support=0.05, contradict=0.20, neutral=0.75),
     ]
-    assert validator.evaluate_check_result(_result("false", scores)) is False
+    assert validator.evaluate_check_result(_result("false", scores)) is True
 
 
 def test_single_near_certain_snippet_passes_via_alt_path(

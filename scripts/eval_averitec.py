@@ -1,20 +1,34 @@
 """Open-retrieval AVeriTeC evaluation for the bsnet pipeline.
 
 Streams the AVeriTeC dev split via HuggingFace ``datasets`` (Arrow-
-mapped, no RAM blowup) and pushes the claims through one
-``Orchestrator`` instance — same usage pattern as the live CLI in
-``bsnet.src.__main__`` — wired up with the production search and
-validator. Emitted verdicts are mapped back to AVeriTeC rows by
-exact ``claim`` text and folded into AVeriTeC's 4-class taxonomy
-(``Supported`` / ``Refuted`` / ``Conflicting Evidence/Cherrypicking``
-/ ``Not Enough Evidence``). Rows that produce no verdict (extractor
-yielded nothing or validator dropped every claim) collapse to
-``Not Enough Evidence``, matching what the live system would
-surface for the user.
+mapped, no RAM blowup) and pushes each claim through the bsnet
+pipeline stages directly (``extract → search → check → validate →
+render``) using the production search backend and validator. The
+heavy ``Pipeline`` is constructed once and shared across rows so
+model weights load exactly once per eval run.
 
-Open-retrieval search is the bottleneck stage, so the default
-``--limit`` keeps a single run short — bump it once a small subset
-looks healthy.
+Direct stage calls instead of ``Orchestrator`` give us per-stage
+visibility — the trace dump records extracted sub-claims, retrieved
+snippets, per-snippet NLI scores, the validator's decision, and the
+rendered explanation. The orchestrator only adds streaming-throughput
+threading on top of the same stages; for sequential per-row eval
+that threading is not load-bearing, and bypassing it lets the eval
+emit a full pipeline trace alongside the headline numbers.
+
+Two output files are written:
+
+- ``--samples-out``: a small curated qualitative-review subset
+  (default 10 rows, miss-first interleaved with correct rows).
+- ``--trace-out``: one record per evaluated row capturing the full
+  per-stage pipeline state, suitable for offline scorer / labeler
+  / renderer analysis.
+
+Predicted bsnet verdicts are folded into AVeriTeC's 4-class
+taxonomy (``Supported`` / ``Refuted`` / ``Conflicting Evidence/
+Cherrypicking`` / ``Not Enough Evidence``). Rows that produce no
+verdict (extractor yielded nothing or validator dropped every
+claim) collapse to ``Not Enough Evidence``, matching what the live
+system would surface to the user.
 """
 
 from __future__ import annotations
@@ -26,7 +40,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-from bsnet.src.runtime.orchestrator import Orchestrator
+from bsnet.src.runtime.pipeline import Pipeline
 from bsnet.src.utils.outputs import Verdict
 from bsnet.src.utils.search import get_search_snippets
 from bsnet.src.validation.validator import Validator
@@ -39,11 +53,17 @@ from bsnet.src.validation.validator import Validator
 _LABEL_MAP: dict[str, str] = {
     "true": "Supported",
     "mostly true": "Supported",
+    # ``partially true`` / ``partially false`` come from bsnet's
+    # max-pool fallback when neither side reaches ``MODERATE_SIGNAL``
+    # — weak-but-directional signal, not "evidence on both sides."
+    # AVeriTeC's ``Conflicting Evidence/Cherrypicking`` requires
+    # actual evidence in both directions, so map the partials to the
+    # directional class their max-pool side indicates.
+    "partially true": "Supported",
+    "partially false": "Refuted",
     "false": "Refuted",
     "mostly false": "Refuted",
     "mixture": "Conflicting Evidence/Cherrypicking",
-    "partially true": "Conflicting Evidence/Cherrypicking",
-    "partially false": "Conflicting Evidence/Cherrypicking",
     "unproven": "Not Enough Evidence",
     "no-evidence": "Not Enough Evidence",
 }
@@ -85,6 +105,102 @@ def _terminate(claim: str) -> str:
     if s[-1] not in ".!?":
         s += "."
     return s
+
+
+def _evaluate_row(
+    pipeline: Pipeline,
+    validator: Validator,
+    claim: str,
+) -> tuple[list[Verdict], list[dict[str, object]]]:
+    """Run one AVeriTeC claim through the full bsnet pipeline.
+
+    Calls the pipeline stages directly (``extract → search → check →
+    validate → render``) instead of routing through ``Orchestrator``
+    so each stage's intermediate state is visible for the trace
+    dump. The orchestrator only adds streaming-throughput threading
+    on top of the same stages; for sequential eval that threading is
+    not load-bearing, and bypassing it lets us capture per-snippet
+    NLI scores, the validator's decision, and the rendered
+    explanation alongside the verdict. Bypassing the
+    ``TranscriptBuffer`` is a small behavioral diff: the extractor
+    sees the full input rather than buffer-pre-split sentences,
+    which is arguably a better fit for AVeriTeC's already-atomic
+    claims than the live transcript-streaming path.
+
+    Args:
+        pipeline: Loaded ``Pipeline`` instance shared across rows.
+        validator: ``Validator`` whose ``evaluate_check_result`` is
+            applied at the validate stage. ``"no-evidence"`` results
+            bypass the validator and short-circuit at render — same
+            rule the orchestrator's validate-loop applies.
+        claim: AVeriTeC claim text to evaluate.
+
+    Returns:
+        ``(verdicts, sub_traces)`` where ``verdicts`` are the
+        rendered ``Verdict`` objects (one per extracted sub-claim
+        that survived the validator) and ``sub_traces`` is a per-
+        sub-claim list of dicts capturing the full pipeline state
+        (extracted text, snippets, per-snippet NLI scores, label,
+        best evidence, validator decision, rendered explanation).
+
+    Preconditions:
+        - ``claim`` is a non-empty string.
+        - A network connection is available for the search stage.
+
+    Postconditions:
+        - Does not mutate ``pipeline`` or ``validator``.
+        - Performs live HTTP requests via ``get_search_snippets``.
+        - ``len(sub_traces) == len(pipeline.extract(claim))``.
+        - ``len(verdicts) <= len(sub_traces)``.
+    """
+    extracted = pipeline.extract(_terminate(claim))
+
+    sub_traces: list[dict[str, object]] = []
+    verdicts: list[Verdict] = []
+
+    for sub in extracted:
+        snippets = get_search_snippets(sub.text)
+        check_result = pipeline.check(sub.text, snippets)
+
+        # Mirror the orchestrator's validate-loop rule: ``no-evidence``
+        # bypasses the validator and short-circuits at render.
+        if check_result.label == "no-evidence":
+            validator_passed = True
+        else:
+            validator_passed = validator.evaluate_check_result(check_result)
+
+        verdict: Verdict | None = None
+        if validator_passed:
+            verdict = pipeline.render(check_result)
+            verdicts.append(verdict)
+
+        scores = (
+            check_result.scored.scores
+            if check_result.scored is not None
+            else []
+        )
+        sub_traces.append({
+            "extracted_claim": sub.text,
+            "snippet_count": len(snippets),
+            "snippets": list(snippets),
+            "scores": [
+                {
+                    "snippet": s.snippet,
+                    "support": float(s.support),
+                    "contradict": float(s.contradict),
+                    "neutral": float(s.neutral),
+                }
+                for s in scores
+            ],
+            "label": check_result.label,
+            "best_evidence": check_result.evidence,
+            "validator_passed": validator_passed,
+            "rendered_explanation": (
+                verdict.explanation if verdict is not None else None
+            ),
+        })
+
+    return verdicts, sub_traces
 
 
 def _coarse_label(verdict: Verdict | None) -> str:
@@ -184,8 +300,11 @@ def main() -> None:
     parser.add_argument(
         "--limit",
         type=int,
-        default=50,
-        help="Maximum rows to evaluate. Open-retrieval is slow.",
+        default=None,
+        help=(
+            "Maximum rows to evaluate. Defaults to the full split "
+            "(~500 for AVeriTeC dev). Pass an integer to subset."
+        ),
     )
     parser.add_argument(
         "--samples-out",
@@ -199,67 +318,61 @@ def main() -> None:
         default=10,
         help="How many samples to dump for LLM qualitative review.",
     )
+    parser.add_argument(
+        "--trace-out",
+        type=Path,
+        default=Path("scripts/averitec_trace.json"),
+        help=(
+            "Where to write the per-row pipeline trace dump for "
+            "offline analysis (one record per evaluated row, full "
+            "per-stage state)."
+        ),
+    )
     args = parser.parse_args()
 
     ds = load_dataset(args.repo, split=args.split)
     if args.limit is not None and args.limit < len(ds):
         ds = ds.select(range(args.limit))
 
-    # One pass over the Arrow table: builds the verdict→row lookup,
-    # caches the human justifications for the qualitative dump, and
-    # produces the chunk list for the orchestrator. Arrow keeps RAM
-    # bounded across the dev split.
-    gold_by_claim: dict[str, str] = {}
-    justification_by_claim: dict[str, str] = {}
-    chunks: list[str] = []
-    for row in ds:
-        claim = row["claim"].strip()
-        gold_by_claim[claim] = row["label"]
-        justification_by_claim[claim] = (row.get("justification") or "")
-        chunks.append(_terminate(claim))
-
-    orch = Orchestrator(
-        search_fn=get_search_snippets,
-        validate_fn=Validator().evaluate_check_result,
-    )
-
-    verdicts_by_claim: dict[str, Verdict] = {}
-    n_unmatched = 0
-    for verdict in orch.run(iter(chunks)):
-        key = verdict.claim.strip()
-        if key not in gold_by_claim:
-            # Extractor reformulated the claim text — can't attribute
-            # back to a row. Logged separately so the headline
-            # accuracy reflects only attributable verdicts.
-            n_unmatched += 1
-            print(
-                f"unmatched verdict: claim={verdict.claim!r} "
-                f"label={verdict.label!r}"
-            )
-            continue
-        verdicts_by_claim[key] = verdict
-        predicted = _LABEL_MAP[verdict.label]
-        gold = gold_by_claim[key]
-        marker = "ok" if predicted == gold else "MISS"
-        print(f"[{marker}] gold={gold!r} pred={predicted!r}")
+    pipeline = Pipeline()
+    validator = Validator()
 
     confusion: Counter[tuple[str, str]] = Counter()
     n_correct = 0
     n_dropped = 0
     records: list[dict[str, object]] = []
-    for claim, gold in gold_by_claim.items():
-        verdict = verdicts_by_claim.get(claim)
+    traces: list[dict[str, object]] = []
+
+    for i, row in enumerate(ds):
+        claim = row["claim"].strip()
+        gold = row["label"]
+        justification = row.get("justification") or ""
+
+        verdicts, sub_traces = _evaluate_row(pipeline, validator, claim)
+        # Pick the first verdict when the extractor split a compound
+        # claim into sub-claims. Aggregating across sub-claims is
+        # tempting but bsnet's labeler already runs per-claim, so the
+        # first is the most representative single-row signal.
+        verdict = verdicts[0] if verdicts else None
         if verdict is None:
             n_dropped += 1
+
         predicted = _coarse_label(verdict)
         confusion[(gold, predicted)] += 1
         is_correct = predicted == gold
         if is_correct:
             n_correct += 1
+
+        marker = "ok" if is_correct else "MISS"
+        print(
+            f"[{i + 1}/{len(ds)}] [{marker}] gold={gold!r} "
+            f"pred={predicted!r} verdicts={len(verdicts)}"
+        )
+
         records.append({
             "claim": claim,
             "gold_label": gold,
-            "gold_justification": justification_by_claim.get(claim, ""),
+            "gold_justification": justification,
             "predicted_label": predicted,
             "bsnet_label": verdict.label if verdict is not None else None,
             "evidence": verdict.evidence if verdict is not None else None,
@@ -268,18 +381,32 @@ def main() -> None:
             "correct": is_correct,
         })
 
+        traces.append({
+            "row_index": i,
+            "input_claim": claim,
+            "gold_label": gold,
+            "gold_justification": justification,
+            "predicted_label": predicted,
+            "correct": is_correct,
+            "extracted_claims": sub_traces,
+        })
+
     samples = _select_samples(records, args.num_samples)
     args.samples_out.parent.mkdir(parents=True, exist_ok=True)
     with args.samples_out.open("w", encoding="utf-8") as f:
         json.dump(samples, f, indent=2, ensure_ascii=False)
 
-    n_total = len(gold_by_claim)
+    args.trace_out.parent.mkdir(parents=True, exist_ok=True)
+    with args.trace_out.open("w", encoding="utf-8") as f:
+        json.dump(traces, f, indent=2, ensure_ascii=False)
+
+    n_total = len(records)
     accuracy = n_correct / n_total if n_total else 0.0
     print()
     print(f"accuracy: {n_correct}/{n_total} = {accuracy:.4f}")
     print(f"dropped (no verdict): {n_dropped}/{n_total}")
-    print(f"unmatched (extractor reformulation): {n_unmatched}")
     print(f"qualitative samples dumped to: {args.samples_out}")
+    print(f"full pipeline trace dumped to: {args.trace_out}")
     print()
     print("confusion (gold -> predicted):")
     for gold in _AVERITEC_CLASSES:

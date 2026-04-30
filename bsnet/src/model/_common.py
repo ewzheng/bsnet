@@ -10,7 +10,7 @@ import os
 import re
 
 import torch
-from llama_cpp import Llama
+from llama_cpp import Llama, llama_supports_gpu_offload
 from transformers import (
     AutoModelForCausalLM,
     AutoModelForSeq2SeqLM,
@@ -21,7 +21,7 @@ from transformers import (
 # ── Default model identifiers ────────────────────────────────────────────────
 EXTRACTOR_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 EXTRACTOR_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
-SCORER_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+SCORER_MODEL = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
 RENDERER_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 RENDERER_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
 
@@ -210,11 +210,16 @@ def load_llm(
 ) -> Llama:
     """Load a GGUF model via llama-cpp-python.
 
-    Reads ``BSNET_GPU_LAYERS`` from the environment to control GPU
-    offload. Set it to ``-1`` to offload every layer to GPU (requires
-    a CUDA / Metal / ROCm build of ``llama-cpp-python``), or a positive
-    integer to offload that many layers. Defaults to ``0`` (CPU only),
-    preserving the original behavior.
+    Auto-detects GPU offload by default: if the installed
+    ``llama-cpp-python`` was built with a GPU backend (CUDA / Metal /
+    HIPBLAS) — as reported by ``llama_supports_gpu_offload()`` — every
+    layer is offloaded; otherwise the model loads on CPU. Mirrors the
+    auto-detect behavior of ``resolve_device`` for the transformers
+    side so a ROCm / CUDA box runs on GPU without env-var juggling.
+
+    Override via ``BSNET_GPU_LAYERS``: ``-1`` offloads every layer,
+    ``0`` forces CPU, a positive integer offloads that many layers
+    (useful for partial offload on small VRAM).
 
     Args:
         repo: HuggingFace repo ID containing the GGUF file.
@@ -231,11 +236,17 @@ def load_llm(
 
     Postconditions:
         - The model is loaded and ready for chat completion calls.
-        - Layers are offloaded per ``BSNET_GPU_LAYERS`` when the
-          installed ``llama-cpp-python`` supports the target backend;
-          ignored on a CPU-only build.
+        - When ``BSNET_GPU_LAYERS`` is unset, every layer is offloaded
+          on GPU-enabled builds and the model stays on CPU otherwise.
+        - When ``BSNET_GPU_LAYERS`` is set, that exact value is used
+          regardless of build support; an ignored offload on a
+          CPU-only build is a no-op handled by llama-cpp itself.
     """
-    n_gpu_layers = int(os.environ.get("BSNET_GPU_LAYERS", "0"))
+    raw = os.environ.get("BSNET_GPU_LAYERS")
+    if raw is not None:
+        n_gpu_layers = int(raw)
+    else:
+        n_gpu_layers = -1 if llama_supports_gpu_offload() else 0
     return Llama.from_pretrained(
         repo,
         filename=gguf_file,
