@@ -1,6 +1,6 @@
 """Command-line entry point for the bsnet package.
 
-When invoked via ``python -m bsnet.src`` the module opens a live
+When invoked via ``python -m bsnet`` the module opens a live
 microphone transcription stream and drives the orchestrator from it,
 printing each rendered ``Verdict`` as the fact-checking pipeline
 produces it. Importing and calling ``main()`` without arguments is a
@@ -110,7 +110,12 @@ def main(chunk_source: Iterable[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+def run() -> int:
+    """Console-script entry point: open the mic and run the pipeline."""
     from bsnet.src.utils.transcription import listen
 
-    raise SystemExit(main(listen()))
+    return main(listen())
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

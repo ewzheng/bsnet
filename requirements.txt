@@ -1,0 +1,14 @@
+numpy
+transformers
+llama-cpp-python
+faster-whisper
+sentencepiece
+tiktoken
+webrtcvad-wheels
+pytest
+ddgs
+torch
+torchaudio
+bitsandbytes
+accelerate
+datasets

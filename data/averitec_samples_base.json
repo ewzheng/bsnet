@@ -1,0 +1,112 @@
+[
+  {
+    "claim": "In a letter to Steve Jobs, Sean Connery refused to appear in an apple commercial.",
+    "gold_label": "Refuted",
+    "gold_justification": "The answer and sources show that the claim was published in a fake news site so the claim is refuted.",
+    "predicted_label": "Supported",
+    "bsnet_label": "true",
+    "evidence": "An image shared on Facebook purportedly shows a letter the late actor Sean Connery wrote to Apple co-founder Steve Jobs rejecting an offer to appear in an Apple advertisement.",
+    "explanation": "This claim is rated true because an image shared on Facebook purportedly shows a letter the late actor Sean Connery wrote to Apple co-founder Steve Jobs rejecting an offer to appear in an Apple advertisement.\n-----\nbased on 5 snippets: 2 strong support, 1 weak support, 2 neutral",
+    "verdict_emitted": true,
+    "correct": false
+  },
+  {
+    "claim": "Trump Administration claimed songwriter Billie Eilish Is Destroying Our Country In Leaked Documents",
+    "gold_label": "Refuted",
+    "gold_justification": "Seems that the Wzshington post accused the singer wrong lyrics. Therefore the claim is refuted",
+    "predicted_label": "Refuted",
+    "bsnet_label": "false",
+    "evidence": "No, the Trump administration did not claim Billie Eilish is .... On Thursday, the “Democracy Dies in Darkness” paper scored viral clicks and copycat headlines with a report alleging the Trump administration had accused pop star Billie Eilish of...",
+    "explanation": "This claim is rated false because the \"Democracy Dies in Darkness\" paper did not score viral clicks and copycat headlines with a report alleging the Trump administration had accused pop star Billie Eilish of...\n-----\nbased on 3 snippets: 1 strong contradict, 1 weak contradict, 1 neutral",
+    "verdict_emitted": true,
+    "correct": true
+  },
+  {
+    "claim": "Due to Imran Khan's criticism of Macron's comments on Islam, French authorities cancelled the visas of 183 Pakistani citizens and deported 118 from the country.",
+    "gold_label": "Refuted",
+    "gold_justification": "The tweet was not the official government page and there is no evidence that visas were cancelled so the claim is refuted.",
+    "predicted_label": "Not Enough Evidence",
+    "bsnet_label": null,
+    "evidence": null,
+    "explanation": null,
+    "verdict_emitted": false,
+    "correct": false
+  },
+  {
+    "claim": "The United States of America and its Western allies have been using their media outlets to publish articles based on fabricated information under allegations of non-compliance with the Chemical Weapons Convention.",
+    "gold_label": "Refuted",
+    "gold_justification": "Refuted by answer/source.",
+    "predicted_label": "Refuted",
+    "bsnet_label": "false",
+    "evidence": "Disinformation in the Russian invasion of Ukraine. has also been spread and promoted by so-called Russian web brigades, using fake profiles on social media. The Ukrainian state and media have used propaganda",
+    "explanation": "This claim is rated false because the evidence provided highlights that disinformation in the Russian invasion of Ukraine has been spread and promoted by so-called Russian web brigades using fake profiles on social media, rather than the United States or its Western allies.\n-----\nbased on 4 snippets: 2 strong contradict, 1 weak contradict, 1 neutral",
+    "verdict_emitted": true,
+    "correct": true
+  },
+  {
+    "claim": "UNESCO declared Nadar community as the most ancient race in the world.",
+    "gold_label": "Refuted",
+    "gold_justification": "This claim is refuted. According to the QA pairs, UNESCO have never declared a \"most ancient race\", and for those who have analysed this question, they have theorised that the San people of southern Africa may be the most \"ancient race\"- no the Nadar community. Therefore, this claim is refuted.",
+    "predicted_label": "Not Enough Evidence",
+    "bsnet_label": null,
+    "evidence": null,
+    "explanation": null,
+    "verdict_emitted": false,
+    "correct": false
+  },
+  {
+    "claim": "More than 225,000 people dead, 225,000. The estimates are, if we’d have acted responsibly, there’d be 160,000 fewer dead than there are today, because of covid-19.",
+    "gold_label": "Supported",
+    "gold_justification": "It seems that indeed the  umbers are true therefore the claim is supported ",
+    "predicted_label": "Supported",
+    "bsnet_label": "mostly true",
+    "evidence": "Where people die - Harvard Health. Although more than 700,000 people die in hospitals each year in the US, the trend is toward fewer in-hospital deaths.",
+    "explanation": "This claim is rated mostly true because more than 700,000 people die in hospitals each year in the US.\n-----\nbased on 3 snippets: 1 weak support, 1 weak contradict, 1 neutral",
+    "verdict_emitted": true,
+    "correct": true
+  },
+  {
+    "claim": "Republican Matt Gaetz was part of a company that had to pay 75 million in hospice fraud. They stole from dying people.",
+    "gold_label": "Refuted",
+    "gold_justification": "The company was sold in 2004 and the law suit was filed in 2013",
+    "predicted_label": "Supported",
+    "bsnet_label": "true",
+    "evidence": "PolitiFact | Post that says Florida Rep. Matt Gaetz has 'numerous DUIs.... He was part of a company that had to pay 75 million in hospice fraud. They stole from dying people. He is the swamp.\"",
+    "explanation": "This claim is rated true because Florida Representative Matt Gaetz was part of a company that had to pay 75 million in hospice fraud, and they stole from dying people.\n-----\nbased on 2 snippets: 1 strong support, 1 neutral",
+    "verdict_emitted": true,
+    "correct": false
+  },
+  {
+    "claim": "New Zealand’s new Food Bill bans gardening",
+    "gold_label": "Refuted",
+    "gold_justification": "The bill is not into legislation for now. I see claim as false. ",
+    "predicted_label": "Refuted",
+    "bsnet_label": "false",
+    "evidence": "New Zealand's 'new' Food Bill doesn't ban gardening | AAP. The Food Bill does not represent \"new\" legislation, nor does it ban gardening and home food production.",
+    "explanation": "This claim is rated false because New Zealand's 'new' Food Bill does not ban gardening and home food production.\n-----\nbased on 3 snippets: 2 strong contradict, 1 neutral",
+    "verdict_emitted": true,
+    "correct": true
+  },
+  {
+    "claim": "Why should you pay more taxes than Donald Trump pays? And that’s a fact. $750. Remember what he said when that was raised a while ago, how he only pays … He said, ‘Because I’m smart. I know how to game the system.’",
+    "gold_label": "Supported",
+    "gold_justification": "True, question mark required (?) ",
+    "predicted_label": "Refuted",
+    "bsnet_label": "mostly false",
+    "evidence": "Some may ask “Why should I pay more taxes than Donald Trump?” but I think that there are good reasons to do […]",
+    "explanation": "This claim is rated mostly false because there are good reasons to do so, including the fact that Donald Trump has been elected President of the United States since 2017 and serves as the head of the executive branch, which includes the U.S. Department of Treasury responsible for managing federal budgets and taxes; furthermore, he is a Republican who holds office until his successor can be found, making him an active political figure with specific responsibilities that justify paying more taxes than many other candidates or individuals.\n-----\nbased on 3 snippets: 1 weak contradict, 2 neutral",
+    "verdict_emitted": true,
+    "correct": false
+  },
+  {
+    "claim": "Jammu and Kashmir (J&K) in Pakistan/India was removed from the United Nations (UN) list of “unresolved disputes”.",
+    "gold_label": "Refuted",
+    "gold_justification": "The answer and source show that they were never on the list so the claim is refuted.",
+    "predicted_label": "Refuted",
+    "bsnet_label": "false",
+    "evidence": "Jammu and Kashmir Dispute - Ministry of Foreign Affairs. Since 1948, the UN Security Council has remained seized of the Jammu & Kashmir dispute under the Agenda item “India-Pakistan Question” and passed over a dozen resolutions.",
+    "explanation": "This claim is rated false because the UN Security Council has remained seized of the Jammu & Kashmir dispute under the Agenda item \"India-Pakistan Question\" and passed over a dozen resolutions since 1948.\n-----\nbased on 2 snippets: 2 strong contradict",
+    "verdict_emitted": true,
+    "correct": true
+  }
+]

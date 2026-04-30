@@ -15,16 +15,20 @@ the claim's topic.
 
 import json
 import re
-import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-import torch
-import torch.nn.functional as F
 from ddgs import DDGS
-from transformers import AutoModel, AutoTokenizer
+
+from bsnet.src.model.embedder import embed
+from bsnet.src.utils._common import (
+    SENTENCE_SPLIT_RE,
+    content_tokens,
+    strip_markdown,
+    truncate_to_word_boundary,
+)
 
 # Backend whitelist for the per-backend parallel search.
 #
@@ -89,51 +93,74 @@ _DATE_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Markdown-stripping regexes applied to scraped bodies in
-# ``_strip_markdown``. Some wikis (e.g. OurBigBook) serve raw
-# markdown that DDGS scrapes verbatim — observed snippets included
-# bold delimiters, link syntax, and heading hashes leaking into the
-# premise. None carry semantic content for NLI and they waste
-# characters of the per-snippet budget; small NLI models can also be
-# confused by the markup.
+# Markdown stripping, word-boundary truncation, content-token
+# extraction, sentence boundary splitting, and the MiniLM sentence
+# embedder live in ``bsnet.src.utils._common`` — they're not
+# search-specific and several other modules use them. See that
+# module for the regex definitions and the embedder singleton.
+
+# Fact-check editorial framing patterns at the start of a snippet
+# title. When present, the title is the fact-checker's restatement
+# of the claim being investigated rather than the conclusion — the
+# body carries the actual answer, but DeBERTa often entails the
+# question form because it lexically restates the claim. Dropping
+# such titles forces NLI to read the body's verdict text instead.
+# Patterns target explicit editorial markers, not generic
+# question-shaped titles, to avoid over-eager dropping of legitimate
+# titles that happen to phrase a topic.
 #
-# Order matters: image syntax must be matched before link syntax
-# (images are ``![alt](url)``, links are ``[text](url)``); fence /
-# delimiter characters are stripped after their wrappers so the
-# inner content survives.
+# Two pattern families:
+#
+#   1. Generic verdict markers — leading colon-separated labels
+#      used across most fact-check publications (``FACT CHECK:``,
+#      ``REALITY CHECK:``, ``VERDICT:``, ``CLAIM:``, ``DEBUNKED:``,
+#      ``HOAX ALERT:``, etc.).
+#
+#   2. Publication house-style framings — phrases that signal a
+#      refutation article without an explicit colon-prefix marker.
+#      Observed in eval traces and confirmed as principled
+#      editorial intent (not generic phrasing):
+#        - FactCheck.org: ``Misleading Posts Target X``
+#        - Reuters / AP / others:
+#            ``Posts Falsely Claim X`` /
+#            ``Videos Wrongly Suggest X``
+_FACT_CHECK_FRAMING_RE = re.compile(
+    r"""
+    ^
+    (?:
+        # ── Generic verdict markers ────────────────────────────
+        FACT[\s\-]?CHECK(?:ING)?[:.]?\s+
+      | REALITY[\s\-]?CHECK[:.]?\s+
+      | VERDICT[:.]?\s+
+      | CLAIM[:.]?\s+
+      | VIRAL[:.]?\s+
+      | DEBUNK(?:ED|ING)?[:.]?\s+
+      | FALSE[:.]\s+
+      | TRUE[:.]\s+
+      | HOAX[\s\-]?ALERT[:.]?\s+
+      | MISINFO(?:RMATION)?[:.]?\s+
+      | RUMOR[\s\-]?CHECK[:.]?\s+
 
-# ``![alt](url)`` — images. Drop entirely (NLI sees no image).
-_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+        # ── Publication house-style framings ──────────────────
+        # "Misleading Posts Target X" (FactCheck.org)
+      | MISLEADING\s+
+        (?:POSTS?|CLAIMS?|VIDEOS?|PHOTOS?|IMAGES?|MEMES?|TWEETS?
+            |HEADLINES?|ADS?|REPORTS?)
+        \s+
 
-# ``[text](url)`` — links. Keep the visible text, drop the URL.
-_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
-
-# ``<!-- ... -->`` — HTML comments. Drop entirely.
-_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-
-# Line-prefix markers — heading hashes (``# X``), blockquote
-# carets (``> X``), horizontal rules (``---``/``***``), and list
-# markers (``- X`` / ``* X`` / ``1. X``). Stripped before character
-# delimiters so an unprefixed line emerges first.
-_MARKDOWN_HR_RE = re.compile(r"^[\-*_=]{3,}\s*$", re.MULTILINE)
-_MARKDOWN_HEADING_RE = re.compile(r"^#+\s*", re.MULTILINE)
-_MARKDOWN_BLOCKQUOTE_RE = re.compile(r"^>+\s*", re.MULTILINE)
-_MARKDOWN_LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+", re.MULTILINE)
-
-# Character delimiters — code fences, inline code, emphasis,
-# strikethrough. After running these the inner content remains as
-# plain prose.
-_MARKDOWN_CODE_FENCE_RE = re.compile(r"`+")
-_MARKDOWN_EMPHASIS_RE = re.compile(r"\*+")
-_MARKDOWN_STRIKE_RE = re.compile(r"~+")
-
-# When truncating to ``_MAX_SNIPPET_CHARS``, back off to the most
-# recent whitespace boundary to avoid cutting mid-word — but only
-# when the backoff distance is small. A pathological snippet with
-# no whitespace in the last 30 chars (rare, mostly URL-only bodies)
-# falls back to the original hard cut so we don't lose half the
-# snippet to backoff.
-_TRUNCATE_BACKOFF_CHARS = 30
+        # "Posts Falsely Claim X" / "Videos Wrongly Suggest X"
+      | (?:POSTS?|VIDEOS?|TWEETS?|PHOTOS?|IMAGES?|MEMES?|RUMORS?
+            |REPORTS?|HEADLINES?|ARTICLES?)
+        \s+
+        (?:FALSELY|WRONGLY|MISLEADINGLY|INCORRECTLY)
+        \s+
+        (?:CLAIM(?:S|ED)?|SAY(?:S)?|SUGGEST(?:S|ED)?
+            |STATE(?:S|D)?|REPORT(?:S|ED)?|SHOW(?:S|ED)?)
+        \s+
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 # Jaccard threshold over content tokens above which a snippet title
 # is considered a near-restatement of the claim and dropped before
@@ -145,25 +172,6 @@ _TRUNCATE_BACKOFF_CHARS = 30
 # the body explicitly denies. Stripping the redundant title forces
 # the scorer to read the actual evidence.
 _TITLE_CLAIM_OVERLAP_DROP = 0.6
-
-# Tokens shorter than this are treated as stopwords and ignored when
-# computing claim/title overlap. Catches "the", "is", "of", "to",
-# "in", "on", "a", "an" without maintaining an explicit list.
-_CONTENT_TOKEN_MIN_LEN = 3
-
-# Strip everything but lowercase letters, digits, and whitespace
-# before tokenizing. Numbers survive (so "299792" tokenizes cleanly
-# after the comma is stripped from "299,792").
-_TOKEN_NORMALIZE_RE = re.compile(r"[^a-z0-9 ]")
-
-# Sentence-embedding model used by the post-retrieval relevance
-# filter. MiniLM-L6-v2 is ~22M params, ~80MB on disk, and hits
-# sub-100ms batched inference for 10 short snippets on CPU — small
-# enough to sit in the search stage without touching the pipeline
-# bottleneck. Any drop-in replacement must produce L2-normalized
-# 384-d embeddings of (query, snippets) so cosine comes out as dot
-# product.
-_EMBEDDER_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Adaptive threshold: keep snippets whose cosine similarity to the
 # claim is within ``_RELEVANCE_BAND`` of the top-scoring snippet.
@@ -178,54 +186,6 @@ _RELEVANCE_BAND = 0.20
 # band filter would. Prevents catastrophic pruning on claims the
 # embedder has low confidence on.
 _RELEVANCE_MIN_KEEP_FRAC = 0.5
-
-# Lazy module-level singleton. Loading the MiniLM weights takes
-# ~1s; we amortize it across every search call.
-_embedder_lock = threading.Lock()
-_embedder_tokenizer: AutoTokenizer | None = None
-_embedder_model: AutoModel | None = None
-
-
-def _strip_markdown(text: str) -> str:
-    """Remove markdown formatting from scraped text.
-
-    Walks the regexes in dependency order: image syntax before link
-    syntax (images are a superset of link syntax); HTML comments;
-    line-prefix markers (HR / heading / blockquote / list); then
-    character delimiters (code fence / emphasis / strikethrough).
-    The result is plain prose with all formatting characters
-    removed and link / list / heading text preserved.
-
-    Args:
-        text: Possibly-markdown text.
-
-    Returns:
-        ``text`` with markdown delimiters removed and link / list /
-        heading content unwrapped.
-
-    Preconditions:
-        - ``text`` is a string.
-
-    Postconditions:
-        - Returned text contains no markdown emphasis (``*``,
-          ``~``), code fence (`` ` ``), heading-hash, blockquote-
-          caret, or list-marker characters in their markdown
-          contexts.
-        - Image and HTML-comment content is removed entirely.
-        - Link text is preserved without the URL.
-        - Does not mutate the input.
-    """
-    text = _MARKDOWN_IMAGE_RE.sub("", text)
-    text = _MARKDOWN_LINK_RE.sub(r"\1", text)
-    text = _HTML_COMMENT_RE.sub("", text)
-    text = _MARKDOWN_HR_RE.sub("", text)
-    text = _MARKDOWN_HEADING_RE.sub("", text)
-    text = _MARKDOWN_BLOCKQUOTE_RE.sub("", text)
-    text = _MARKDOWN_LIST_RE.sub("", text)
-    text = _MARKDOWN_CODE_FENCE_RE.sub("", text)
-    text = _MARKDOWN_EMPHASIS_RE.sub("", text)
-    text = _MARKDOWN_STRIKE_RE.sub("", text)
-    return text
 
 
 def _clean_body(body: str) -> str:
@@ -242,7 +202,7 @@ def _clean_body(body: str) -> str:
 
     Returns:
         The body with leading date stamps removed, markdown stripped
-        via ``_strip_markdown``, and leading/trailing whitespace
+        via ``strip_markdown``, and leading/trailing whitespace
         stripped.
 
     Preconditions:
@@ -255,69 +215,138 @@ def _clean_body(body: str) -> str:
         - Does not mutate the input.
     """
     cleaned = _DATE_PREFIX_RE.sub("", body, count=1)
-    cleaned = _strip_markdown(cleaned)
+    cleaned = strip_markdown(cleaned)
     return cleaned.strip()
 
 
-def _truncate_to_word_boundary(text: str, max_chars: int) -> str:
-    """Truncate ``text`` to ``max_chars``, backing off to whitespace.
+def _smart_window(claim: str, text: str, max_chars: int) -> str:
+    """Slide a ``max_chars`` window over ``text`` anchored on relevance.
 
-    A hard cut at ``max_chars`` often lands mid-word ("approx" instead
-    of "approximately") — DeBERTa-base will hallucinate on the
-    fragment. Backing off to the most recent whitespace preserves the
-    last full word. We cap the backoff at
-    ``_TRUNCATE_BACKOFF_CHARS`` so a pathological no-whitespace
-    snippet doesn't lose half its content to backoff.
+    Splits ``text`` into sentences, embeds each sentence and the claim
+    via the shared MiniLM, picks the highest-similarity sentence as
+    the anchor, and greedily extends the window forward (then
+    backward when forward is exhausted) by adjacent sentences while
+    the running length stays within ``max_chars``. Forward-first
+    matches the structure of fact-check articles where the
+    conclusion follows the topic sentence rather than preceding it.
+    Falls back to ``truncate_to_word_boundary`` when ``text`` has no
+    detectable sentence structure (single-sentence body, URL-only
+    body, etc.) so a degenerate input still gets bounded text out.
+
+    The relevance anchor lets us keep the most claim-aligned content
+    inside the cap when the search-engine snippet is longer than the
+    cap — a common pattern where the search engine's curated body is
+    300–400 chars and our default top-N truncation cut the
+    conclusion. Hardware constraint: ``max_chars`` is held fixed at
+    the lowest-common-denominator runtime budget so per-NLI-batch
+    padding cost stays bounded; this routine moves the window, never
+    grows it.
 
     Args:
-        text: Text to truncate.
-        max_chars: Inclusive upper bound on returned length.
+        claim: The claim text used as the relevance query for the
+            sentence ranker. Must be non-empty.
+        text: Snippet body to window. Already cleaned of date
+            prefixes / markdown by the caller.
+        max_chars: Inclusive upper bound on the returned window's
+            length. Must be a positive integer.
 
     Returns:
-        ``text`` if it already fits; otherwise the largest prefix
-        not exceeding ``max_chars`` and ending at a whitespace
-        boundary (or hard-cut at ``max_chars`` when no whitespace is
-        within ``_TRUNCATE_BACKOFF_CHARS`` of the cut).
+        ``text`` unchanged when it already fits within ``max_chars``;
+        otherwise the joined run of sentences anchored on the most
+        claim-relevant sentence and extended forward / backward to
+        fill the budget. When ``text`` has only one sentence the
+        return value is ``truncate_to_word_boundary(text, max_chars)``.
 
     Preconditions:
+        - ``claim`` is a non-empty string.
+        - ``text`` is a string.
         - ``max_chars`` is a positive integer.
 
     Postconditions:
         - ``len(result) <= max_chars``.
-        - Returned text has no trailing whitespace.
+        - The returned text is a contiguous run of sentences from
+          ``text`` (no reordering, no synthetic insertions).
+        - Does not mutate the input.
     """
+    text = text.strip()
+    if not text:
+        return text
     if len(text) <= max_chars:
         return text
-    truncated = text[:max_chars]
-    last_space = truncated.rfind(" ")
-    if 0 < max_chars - last_space <= _TRUNCATE_BACKOFF_CHARS:
-        truncated = truncated[:last_space]
-    return truncated.rstrip()
+
+    sentences = [s.strip() for s in SENTENCE_SPLIT_RE.split(text)]
+    sentences = [s for s in sentences if s]
+    if len(sentences) <= 1:
+        return truncate_to_word_boundary(text, max_chars)
+
+    embeds = embed([claim] + sentences)
+    claim_emb = embeds[0:1]
+    sentence_embs = embeds[1:]
+    sims = (sentence_embs @ claim_emb.T).squeeze(-1).tolist()
+
+    anchor = max(range(len(sentences)), key=lambda i: sims[i])
+
+    # Anchor sentence may itself exceed the budget — fall back to
+    # word-boundary truncation on it directly rather than emitting a
+    # window with negative remaining capacity.
+    if len(sentences[anchor]) >= max_chars:
+        return truncate_to_word_boundary(sentences[anchor], max_chars)
+
+    left = right = anchor
+    used = len(sentences[anchor])
+    extended = True
+    while used < max_chars and extended:
+        extended = False
+        if right + 1 < len(sentences):
+            cost = 1 + len(sentences[right + 1])
+            if used + cost <= max_chars:
+                right += 1
+                used += cost
+                extended = True
+                continue  # Forward-first: always try forward before backward.
+        if left > 0:
+            cost = 1 + len(sentences[left - 1])
+            if used + cost <= max_chars:
+                left -= 1
+                used += cost
+                extended = True
+
+    return " ".join(sentences[left:right + 1])
 
 
-def _content_tokens(text: str) -> set[str]:
-    """Return lowercase content-word tokens from ``text``.
+def _title_is_fact_check_framing(title: str) -> bool:
+    """Decide whether a title carries explicit fact-check framing.
 
-    Strips non-alphanumeric characters, lowercases, splits on
-    whitespace, and drops tokens shorter than
-    ``_CONTENT_TOKEN_MIN_LEN`` so common stopwords ("the", "is",
-    "of", "to") are filtered without maintaining an explicit list.
+    Fact-checkers commonly title an article with the claim phrased
+    as a question (``FACT CHECK: Did X happen?``). The title is the
+    *question being investigated*, not the answer — and DeBERTa
+    routinely entails on the question form because the question
+    lexically restates the claim. Dropping such titles before
+    composition forces NLI to read the body's verdict text instead.
+
+    The detector is anchored on explicit editorial markers
+    (``FACT CHECK``, ``REALITY CHECK``, ``VERDICT``, ``CLAIM``,
+    ``DEBUNKED``, ``FALSE:`` / ``TRUE:``) rather than generic
+    question-shaped titles to avoid over-eager dropping of
+    legitimate titles that phrase a topic as a question.
 
     Args:
-        text: Arbitrary text.
+        title: Candidate snippet title.
 
     Returns:
-        A set of normalized content tokens.
+        ``True`` when the title starts with a fact-check editorial
+        marker and should be dropped before composition.
 
     Preconditions:
-        - ``text`` is a string.
+        - ``title`` is a string.
 
     Postconditions:
-        - Every returned token is lowercase alphanumeric.
-        - Every returned token has length ``>= _CONTENT_TOKEN_MIN_LEN``.
+        - Returns ``False`` for empty or whitespace-only titles.
+        - Does not mutate the input.
     """
-    cleaned = _TOKEN_NORMALIZE_RE.sub(" ", text.lower())
-    return {t for t in cleaned.split() if len(t) >= _CONTENT_TOKEN_MIN_LEN}
+    if not title.strip():
+        return False
+    return bool(_FACT_CHECK_FRAMING_RE.match(title.strip()))
 
 
 def _title_restates_claim(claim_tokens: set[str], title: str) -> bool:
@@ -339,7 +368,7 @@ def _title_restates_claim(claim_tokens: set[str], title: str) -> bool:
         ``True`` when the title should be dropped before scoring.
 
     Preconditions:
-        - ``claim_tokens`` was produced by ``_content_tokens``.
+        - ``claim_tokens`` was produced by ``content_tokens``.
         - ``title`` is a string.
 
     Postconditions:
@@ -349,61 +378,12 @@ def _title_restates_claim(claim_tokens: set[str], title: str) -> bool:
     title = title.strip()
     if not title or not claim_tokens:
         return False
-    title_tokens = _content_tokens(title)
+    title_tokens = content_tokens(title)
     if not title_tokens:
         return False
     intersection = claim_tokens & title_tokens
     union = claim_tokens | title_tokens
     return (len(intersection) / len(union)) >= _TITLE_CLAIM_OVERLAP_DROP
-
-
-def _get_embedder() -> tuple[AutoTokenizer, AutoModel]:
-    """Return the shared embedder tokenizer + model, loading lazily.
-
-    Postconditions:
-        - Both objects are in eval mode after the first call.
-        - Subsequent calls return the cached instances.
-    """
-    global _embedder_tokenizer, _embedder_model
-    if _embedder_model is not None:
-        return _embedder_tokenizer, _embedder_model
-    with _embedder_lock:
-        if _embedder_model is None:
-            tok = AutoTokenizer.from_pretrained(_EMBEDDER_MODEL)
-            mdl = AutoModel.from_pretrained(_EMBEDDER_MODEL)
-            mdl.eval()
-            _embedder_tokenizer = tok
-            _embedder_model = mdl
-    return _embedder_tokenizer, _embedder_model
-
-
-def _embed(texts: list[str]) -> torch.Tensor:
-    """Encode texts into L2-normalized mean-pooled sentence embeddings.
-
-    Args:
-        texts: Non-empty list of strings to encode.
-
-    Returns:
-        A ``(N, 384)`` float tensor where each row is the unit-norm
-        embedding of the corresponding input.
-
-    Preconditions:
-        - ``texts`` is non-empty.
-
-    Postconditions:
-        - Each returned row has L2 norm ≈ 1.
-        - Does not mutate the loaded model.
-    """
-    tokenizer, model = _get_embedder()
-    batch = tokenizer(
-        texts, padding=True, truncation=True, return_tensors="pt",
-    )
-    with torch.no_grad():
-        out = model(**batch)
-    token_embeds = out.last_hidden_state
-    mask = batch["attention_mask"].unsqueeze(-1).float()
-    pooled = (token_embeds * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
-    return F.normalize(pooled, p=2, dim=1)
 
 
 def _relevance_filter(query: str, snippets: list[str]) -> list[str]:
@@ -436,7 +416,7 @@ def _relevance_filter(query: str, snippets: list[str]) -> list[str]:
     """
     if len(snippets) <= 2:
         return snippets
-    embeds = _embed([query] + snippets)
+    embeds = embed([query] + snippets)
     claim_emb = embeds[0:1]
     snippet_embs = embeds[1:]
     sims = (snippet_embs @ claim_emb.T).squeeze(-1).tolist()
@@ -524,27 +504,38 @@ def get_search_snippets(
     if not backends:
         return []
 
-    claim_tokens = _content_tokens(query)
+    claim_tokens = content_tokens(query)
 
     def _compose(title: str, body: str) -> str:
-        """Concat title + body and truncate to the per-snippet char cap.
+        """Compose title + relevance-anchored body window into one snippet.
 
         Strips search-result noise (date prefixes, markdown markers)
-        from the body before concatenation, then truncates at a word
-        boundary so the NLI scorer never sees a fragment like
-        "approx" mid-word. When the title's content tokens overlap
-        heavily with the claim's, the title is dropped before
-        concatenation — see ``_TITLE_CLAIM_OVERLAP_DROP`` for the
-        rationale.
+        from the body, drops the title when it near-restates the
+        claim (see ``_TITLE_CLAIM_OVERLAP_DROP``), and reserves the
+        title's char budget at the front of the cap. The body itself
+        gets smart-windowed via ``_smart_window`` so the most claim-
+        relevant sentences land inside the cap rather than always the
+        first ``_MAX_SNIPPET_CHARS`` chars — search-engine bodies
+        regularly run 300–400 chars and the conclusion of fact-check
+        articles often sits past the cap when truncation is top-down.
+
+        When the title alone would already exceed the cap (degenerate
+        case), falls back to word-boundary truncation on the title.
         """
         body = _clean_body(body)
-        if title and _title_restates_claim(claim_tokens, title):
-            text = body
-        elif title:
-            text = f"{title}. {body}"
-        else:
-            text = body
-        return _truncate_to_word_boundary(text, _MAX_SNIPPET_CHARS)
+        title_keep = (
+            title
+            and not _title_restates_claim(claim_tokens, title)
+            and not _title_is_fact_check_framing(title)
+        )
+        if not title_keep:
+            return _smart_window(query, body, _MAX_SNIPPET_CHARS)
+        prefix = f"{title}. "
+        body_budget = _MAX_SNIPPET_CHARS - len(prefix)
+        if body_budget <= 0:
+            return truncate_to_word_boundary(title, _MAX_SNIPPET_CHARS)
+        windowed_body = _smart_window(query, body, body_budget)
+        return prefix + windowed_body
 
     def _search_ddgs(single_backend: str) -> list[str]:
         """Run a DDGS search against one backend and extract title+body."""

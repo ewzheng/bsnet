@@ -15,7 +15,8 @@ Runs on Windows via a conda environment (`environment.yml`). Models:
 - **Extractor + renderer**: `Qwen_Qwen3.5-0.8B-Q4_K_M.gguf` via
   `llama-cpp-python`.
 - **Scorer**: `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` via
-  `transformers`, loaded with `bitsandbytes` 8-bit quantization on CPU.
+  `transformers`, loaded with `bitsandbytes` 8-bit quantization on CPU /
+  CUDA and fp32 on ROCm (auto-detected).
 - **Relevance reranker**: `sentence-transformers/all-MiniLM-L6-v2` via
   `transformers` (mean-pool + L2-norm).
 - **Transcription**: `faster-whisper` (base, int8 on CPU by default).
@@ -119,7 +120,7 @@ communicate status. See that file for the update format.
 
 ## Conventions
 
-- CLI entry: `python -m bsnet.src` → `bsnet/src/__main__.py::main()`.
+- CLI entry: `python -m bsnet` → `bsnet/__main__.py::main()`.
 - Package imports: `from bsnet.src.<module> import ...`.
 - Tests live in `tests/` and follow `test_*.py` naming.
 - Config: `pytest.ini` at root, `environment.yml` for conda.
