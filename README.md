@@ -104,12 +104,3 @@ tests/                 pytest suite
 .llm/                  project standards and agent conventions
 environment.yml        conda env definition
 ```
-
-## Contributing
-
-Project conventions, docstring standards, and multi-agent coordination
-notes live under `.llm/`:
-
-- [`.llm/llm.md`](.llm/llm.md) — project overview and code standards
-- [`.llm/documentation.MD`](.llm/documentation.MD) — docstring format
-- [`.llm/blackboard.MD`](.llm/blackboard.MD) — multi-agent coordination
