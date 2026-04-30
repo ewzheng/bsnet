@@ -28,7 +28,7 @@ conda activate bsnet
 The first run downloads model weights on demand:
 
 - Extractor + renderer: `Qwen_Qwen3.5-0.8B-Q4_K_M.gguf` via `llama-cpp-python`
-- Scorer: `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` via `transformers`
+- Scorer: `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` via `transformers`
 - Reranker: `sentence-transformers/all-MiniLM-L6-v2`
 - Transcription: faster-whisper base model
 

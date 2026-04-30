@@ -14,7 +14,7 @@ Runs on Windows via a conda environment (`environment.yml`). Models:
 
 - **Extractor + renderer**: `Qwen_Qwen3.5-0.8B-Q4_K_M.gguf` via
   `llama-cpp-python`.
-- **Scorer**: `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli` via
+- **Scorer**: `MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli` via
   `transformers`, loaded with `bitsandbytes` 8-bit quantization on CPU /
   CUDA and fp32 on ROCm (auto-detected).
 - **Relevance reranker**: `sentence-transformers/all-MiniLM-L6-v2` via
