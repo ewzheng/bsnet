@@ -117,6 +117,65 @@ those constants to swap the model or target a GPU.
     directories in `site-packages` and a 5–10× slowdown on dependency
     operations; native Linux paths (`~/...`) are strongly recommended.
 
+## Evaluation
+
+Evaluated on the AVeriTeC dev split (500 claims, EMNLP 2024 FEVER
+shared task) via `scripts/eval_averitec.py`. Reported numbers use
+the deployable `DeBERTa-v3-base` scorer that runs on consumer CPU
+at streaming latency. A `DeBERTa-v3-large` row is included as an
+ablation to quantify the size-vs-latency tradeoff.
+
+### Headline metrics
+
+| Metric | DeBERTa-base (deployable) | DeBERTa-large (ablation, ~3× slower) |
+|---|---|---|
+| Accuracy | 0.416 | 0.464 |
+| Macro F1 | 0.288 | 0.329 |
+| Weighted F1 | 0.447 | 0.497 |
+| Drop rate (predicted NEI from validator-drop) | 23.4% | 25.0% |
+
+### Per-class breakdown (DeBERTa-base)
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| Supported | 0.370 | 0.549 | 0.442 | 122 |
+| Refuted | 0.729 | 0.423 | 0.535 | 305 |
+| Conflicting Evidence/Cherrypicking | 0.045 | 0.026 | 0.033 | 38 |
+| Not Enough Evidence | 0.092 | 0.314 | 0.142 | 35 |
+
+### Comparison to FEVER 2024 shared task
+
+The shared task winners use 70B-class language models for the
+veracity step plus multi-stage retrieve-decompose-reason pipelines
+that run in batch mode. The bsnet pipeline targets real-time
+consumer hardware with veracity models two orders of magnitude
+smaller, so the comparison is across operating regimes rather than
+within the leaderboard.
+
+| System | Score | Notes |
+|---|---|---|
+| TUDA_MAI (#1) | 0.63 AVeriTeC | GPT-4o multi-stage |
+| HerO / HUMANE (#2) | 0.752 dev acc / 0.57 AVeriTeC | Llama-3.1-70B veracity |
+| Papelo (#5) | 0.48 AVeriTeC | T5 + GPT-4o multi-hop |
+| **bsnet (this work)** | **0.416 dev acc / 0.288 macro F1** | DeBERTa-v3-base NLI (184M) + Qwen3.5-0.8B, single-pass, real-time |
+| Provided baseline | 0.11 AVeriTeC | BLOOM-7B + BM25 + pretrained BERT |
+
+The official AVeriTeC score combines verdict correctness with
+retrieved-evidence METEOR similarity to gold question-answer pairs.
+Verdict-only accuracy and F1 are reported here since the streaming
+pipeline does not generate question-answer pairs and the
+leaderboard metric is not directly comparable.
+
+### Reproduce
+
+```bash
+python scripts/eval_averitec.py
+```
+
+Writes `scripts/averitec_samples.json` (curated qualitative
+samples) and `scripts/averitec_trace.json` (per-row per-stage
+trace) alongside the printed confusion matrix.
+
 ## Tests
 
 ```bash
