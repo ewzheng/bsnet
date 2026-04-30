@@ -119,7 +119,7 @@ communicate status. See that file for the update format.
 
 ## Conventions
 
-- CLI entry: `python -m bsnet.src` → `bsnet/src/__main__.py::main()`.
+- CLI entry: `python -m bsnet` → `bsnet/__main__.py::main()`.
 - Package imports: `from bsnet.src.<module> import ...`.
 - Tests live in `tests/` and follow `test_*.py` naming.
 - Config: `pytest.ini` at root, `environment.yml` for conda.

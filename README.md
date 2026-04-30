@@ -40,7 +40,7 @@ audio hardware.
 Launch the live CLI:
 
 ```bash
-python -m bsnet.src
+python -m bsnet
 ```
 
 The process starts listening, transcribes speech, and prints each verdict
@@ -60,7 +60,7 @@ To drive the pipeline from a non-audio source (tests, scripted inputs),
 import `main` and pass an iterable of transcript-chunk strings:
 
 ```python
-from bsnet.src.__main__ import main
+from bsnet.__main__ import main
 main(iter(["The unemployment rate dropped to 3.4% in January 2023."]))
 ```
 
@@ -94,12 +94,13 @@ Test layout:
 ## Repository layout
 
 ```
-bsnet/src/
+bsnet/
   __main__.py          CLI entry point
-  model/               extractor, scorer, renderer, shared model helpers
-  runtime/             orchestrator and pipeline
-  utils/               transcript buffer, search, transcription, output types
-  validation/          downstream validation hook
+  src/
+    model/             extractor, scorer, renderer, shared model helpers
+    runtime/           orchestrator and pipeline
+    utils/             transcript buffer, search, transcription, output types
+    validation/        downstream validation hook
 tests/                 pytest suite
 .llm/                  project standards and agent conventions
 environment.yml        conda env definition

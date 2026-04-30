@@ -1,6 +1,6 @@
 """Command-line entry point for the bsnet package.
 
-When invoked via ``python -m bsnet.src`` the module opens a live
+When invoked via ``python -m bsnet`` the module opens a live
 microphone transcription stream and drives the orchestrator from it,
 printing each rendered ``Verdict`` as the fact-checking pipeline
 produces it. Importing and calling ``main()`` without arguments is a
