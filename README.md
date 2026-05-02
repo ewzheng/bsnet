@@ -18,11 +18,17 @@ Labels produced: `true`, `mostly true`, `partially true`, `mixture`,
 
 ## Install
 
-Requires a working conda install.
+You can create the runtime environment with conda or venv:
 
 ```bash
 conda env create -f environment.yml
 conda activate bsnet
+```
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
 The first run downloads model weights on demand:
@@ -165,6 +171,9 @@ retrieved-evidence METEOR similarity to gold question-answer pairs.
 Verdict-only accuracy and F1 are reported here since the streaming
 pipeline does not generate question-answer pairs and the
 leaderboard metric is not directly comparable.
+
+When compared holistically to pipelines running much heavier models and
+multi-stage workflows, we believe the performance of BSNet is quite competitive for its size.
 
 ### Reproduce
 
