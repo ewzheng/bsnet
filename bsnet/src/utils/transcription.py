@@ -66,6 +66,7 @@ PREROLL_FRAMES     = int(200 / FRAME_MS)   # ~200 ms kept before speech starts
 IDLE_FLUSH_FRAMES  = int(1500 / FRAME_MS)  # ~1.5 s post-utterance silence → flush
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 

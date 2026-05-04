@@ -1,4 +1,4 @@
-# bsnet
+# BSNet
 
 Real-time fact-checking for live speech. Transcribes microphone audio, extracts
 factual claims as they're spoken, searches the web for evidence, and prints a
@@ -18,11 +18,17 @@ Labels produced: `true`, `mostly true`, `partially true`, `mixture`,
 
 ## Install
 
-Requires a working conda install.
+You can create the runtime environment with conda or venv:
 
 ```bash
 conda env create -f environment.yml
 conda activate bsnet
+```
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
 The first run downloads model weights on demand:
@@ -148,24 +154,29 @@ ablation to quantify the size-vs-latency tradeoff.
 
 The shared task winners use 70B-class language models for the
 veracity step plus multi-stage retrieve-decompose-reason pipelines
-that run in batch mode. The bsnet pipeline targets real-time
+that run in batch mode. The BSNet pipeline targets real-time
 consumer hardware with veracity models two orders of magnitude
 smaller, so the comparison is across operating regimes rather than
 within the leaderboard.
 
 | System | Score | Notes |
 |---|---|---|
-| TUDA_MAI (#1) | 0.63 AVeriTeC | GPT-4o multi-stage |
-| HerO / HUMANE (#2) | 0.752 dev acc / 0.57 AVeriTeC | Llama-3.1-70B veracity |
-| Papelo (#5) | 0.48 AVeriTeC | T5 + GPT-4o multi-hop |
-| **bsnet (this work)** | **0.416 dev acc / 0.288 macro F1** | DeBERTa-v3-base NLI (184M) + Qwen3.5-0.8B, single-pass, real-time |
-| Provided baseline | 0.11 AVeriTeC | BLOOM-7B + BM25 + pretrained BERT |
+| TUDA_MAI (#1) | 0.724 dev acc / 0.630 AVeriTeC | GPT-4o multi-stage |
+| HerO / HUMANE (#2) | 0.752 dev acc / 0.570 AVeriTeC | Llama-3.1-70B veracity (standalone acc) |
+| Papelo (#5) | 0.754 dev acc / 0.480 AVeriTeC | T5 + GPT-4o multi-hop |
+| **BSNet (this work)** | **0.416 dev acc / 0.288 Macro F1** | DeBERTa-v3-base NLI (184M) + Qwen3.5-0.8B, single-pass, real-time |
+| Provided baseline | 0.110 AVeriTeC / 0.230 Macro F1 | BLOOM-7B + BM25 + pretrained BERT |
+| Uniform Random | 0.250 dev acc / 0.207 Macro F1 | Performance of a model that predicts randomly |
+| Majority Class | 0.610 dev acc / 0.190 Macro F1 | Performance of a model that only predicts 'refuted' |
 
 The official AVeriTeC score combines verdict correctness with
 retrieved-evidence METEOR similarity to gold question-answer pairs.
 Verdict-only accuracy and F1 are reported here since the streaming
 pipeline does not generate question-answer pairs and the
 leaderboard metric is not directly comparable.
+
+When compared holistically to pipelines running much heavier models and
+multi-stage workflows, we believe the performance of BSNet is quite competitive for its size.
 
 ### Reproduce
 
