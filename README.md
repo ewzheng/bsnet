@@ -165,6 +165,8 @@ within the leaderboard.
 | Papelo (#5) | 0.754 dev acc / 0.480 AVeriTeC | T5 + GPT-4o multi-hop |
 | **BSNet (this work)** | **0.416 dev acc** / **0.288 Macro F1**| DeBERTa-v3-base NLI (184M) + Qwen3.5-0.8B, non-iterative, real-time |
 | Provided baseline | 0.110 AVeriTeC / 0.230 Macro F1 | BLOOM-7B + BM25 + pretrained BERT |
+| Uniform Random | 0.250 dev acc / 0.207 Macro F1 | Performance of a model that predicts randomly | 
+| Majority Class | 0.610 dev acc / 0.190 Macro F1 | Performance of a model that only predicts 'refuted' |
 
 The official AVeriTeC score combines verdict correctness with
 retrieved-evidence METEOR similarity to gold question-answer pairs.
