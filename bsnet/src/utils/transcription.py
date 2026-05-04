@@ -11,11 +11,17 @@ import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"  # Fix: multiple OpenMP runtimes on Windows
 
 import io
+import re
 import wave
 import collections
 import pyaudio
 import webrtcvad
 from faster_whisper import WhisperModel
+
+# Sentence boundary used to chunk transcription output for the
+# repetition collapser. Matches the same family of terminators
+# Whisper inserts when it punctuates speech.
+_SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
 
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL_SIZE         = "base"    # tiny=fastest | base | small | medium | large-v3
@@ -29,8 +35,15 @@ FRAME_BYTES        = FRAME_SAMPLES * 2                     # 16-bit = 2 bytes/sa
 VAD_AGGRESSIVENESS = 2        # 0=permissive … 3=aggressive (filters more noise)
 
 # Silence threshold: consecutive silent frames before we treat utterance as done
-SILENCE_FRAMES     = int(300 / FRAME_MS)   # ~600 ms of silence → transcribe
+SILENCE_FRAMES     = int(300 / FRAME_MS)   # ~300 ms of silence → transcribe
 PREROLL_FRAMES     = int(200 / FRAME_MS)   # ~200 ms kept before speech starts
+
+# After a transcription lands, hold the accumulated chunk briefly in case
+# the speaker pauses mid-thought and resumes. If no new speech arrives for
+# IDLE_FLUSH_FRAMES, flush whatever is buffered downstream — otherwise
+# short single utterances never reach the
+# 100-char early-flush trigger and the pipeline never fires.
+IDLE_FLUSH_FRAMES  = int(1500 / FRAME_MS)  # ~1.5 s post-utterance silence → flush
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -46,6 +59,33 @@ def pcm_to_wav_bytes(pcm: bytes, rate: int = SAMPLE_RATE) -> bytes:
     return buf.getvalue()
 
 
+def _collapse_repeats(text: str) -> str:
+    """Collapse consecutive identical sentences in Whisper output.
+
+    Whisper occasionally falls into a repetition loop on low-SNR
+    audio, emitting the same sentence dozens of times back-to-back
+    (``"I'm going to put it on the screen. I'm going to put it on
+    the screen. ..."``). ``condition_on_previous_text=False`` makes
+    this rarer but does not eliminate it. Splits the output on
+    sentence boundaries, dedupes adjacent identical sentences (case-
+    and whitespace-insensitive), and rejoins. Non-adjacent repeats
+    are left alone — those are usually legitimate speech patterns,
+    not hallucinations.
+    """
+    sentences = [s.strip() for s in _SENT_SPLIT_RE.split(text) if s.strip()]
+    if not sentences:
+        return text
+    deduped: list[str] = []
+    last_key: str | None = None
+    for sent in sentences:
+        key = sent.lower()
+        if key == last_key:
+            continue
+        deduped.append(sent)
+        last_key = key
+    return " ".join(deduped)
+
+
 def transcribe(model: WhisperModel, pcm: bytes) -> str:
     wav = pcm_to_wav_bytes(pcm)
     segments, _ = model.transcribe(
@@ -59,7 +99,8 @@ def transcribe(model: WhisperModel, pcm: bytes) -> str:
         no_speech_threshold=0.6,
         log_prob_threshold=-1.0,
     )
-    return " ".join(seg.text.strip() for seg in segments)
+    raw = " ".join(seg.text.strip() for seg in segments)
+    return _collapse_repeats(raw)
 
 
 def listen():
@@ -90,6 +131,7 @@ def listen():
     ring         = collections.deque(maxlen=PREROLL_FRAMES)
     voiced       = []
     silent_count = 0
+    idle_silence = 0
     speaking     = False
 
     print("Listening … (Ctrl+C to stop)\n")
@@ -109,6 +151,7 @@ def listen():
                 else:
                     voiced.append(frame)
                 silent_count = 0
+                idle_silence = 0
 
             else:
                 ring.append(frame)
@@ -119,6 +162,7 @@ def listen():
                     if silent_count >= SILENCE_FRAMES:
                         speaking     = False
                         silent_count = 0
+                        idle_silence = 0
                         pcm          = b"".join(voiced)
                         voiced       = []
 
@@ -134,6 +178,15 @@ def listen():
                             print(f"\n── chunk ──\n{chunk}\n───────────\n")
                             yield chunk
                             accumulated = ""
+
+                elif accumulated:
+                    idle_silence += 1
+                    if idle_silence >= IDLE_FLUSH_FRAMES:
+                        chunk = accumulated.strip()
+                        print(f"\n── chunk ──\n{chunk}\n───────────\n")
+                        yield chunk
+                        accumulated  = ""
+                        idle_silence = 0
 
     except KeyboardInterrupt:
         print("\nStopped.")

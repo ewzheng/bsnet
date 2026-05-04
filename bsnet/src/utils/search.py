@@ -13,6 +13,7 @@ snippets that full-text search surfaces but aren't actually about
 the claim's topic.
 """
 
+import html
 import json
 import re
 import urllib.error
@@ -29,6 +30,7 @@ from bsnet.src.utils._common import (
     strip_markdown,
     truncate_to_word_boundary,
 )
+from bsnet.src.utils.outputs import EvidenceSnippet
 
 # Backend whitelist for the per-backend parallel search.
 #
@@ -49,6 +51,20 @@ from bsnet.src.utils._common import (
 # index is too small; Yandex and Grokipedia return low-quality
 # results for fact-check queries.
 DEFAULT_BACKENDS = "google,duckduckgo,wikipedia"
+
+# Subtractive query-string operators appended to every DDGS query.
+# Tells the backend's query parser to exclude pages that match these
+# content terms — observed in the wild when satirical articles
+# (defconnews-style "Joe Biden claims to be gay") rank highly enough
+# to dominate a sparse evidence pool and lexically entail the claim.
+# Subtractive only: any positive directive ("news", "factual",
+# "according to") reshapes the ranker the way the dropped
+# ``"fact check"`` prefix did, dragging results toward Snopes-style
+# rebuttals instead of primary sources. Wikipedia REST does not
+# honor Google query operators (the terms would be treated as
+# additional keywords, hurting recall) so this string is appended
+# only on the DDGS path.
+_SUBTRACTIVE_QUERY_TERMS = "-satire -parody -humor -joke"
 
 # MediaWiki REST search endpoint. Full-text search returning page
 # title, short description, and a contextual excerpt. See
@@ -191,30 +207,35 @@ _RELEVANCE_MIN_KEEP_FRAC = 0.5
 def _clean_body(body: str) -> str:
     """Strip search-result noise from a snippet body before composition.
 
-    Removes DDGS-prepended date stamps and any markdown formatting.
-    Both are pure noise from the NLI scorer's perspective and waste
-    characters of the per-snippet truncation budget — every char
-    dropped here is a char of real content that survives the cap
-    downstream.
+    Decodes HTML entities (DDGS frequently surfaces ``&quot;`` /
+    ``&#039;`` / ``&amp;`` verbatim, which both wastes characters of
+    the per-snippet budget and confuses NLI/embedder tokenizers),
+    removes DDGS-prepended date stamps, and drops markdown
+    formatting. All three are pure noise from the scorer's
+    perspective — every char dropped here is a char of real content
+    that survives the cap downstream.
 
     Args:
         body: Raw snippet body returned by a search backend.
 
     Returns:
-        The body with leading date stamps removed, markdown stripped
-        via ``strip_markdown``, and leading/trailing whitespace
-        stripped.
+        The body with HTML entities decoded, leading date stamps
+        removed, markdown stripped via ``strip_markdown``, and
+        leading/trailing whitespace stripped.
 
     Preconditions:
         - ``body`` is a string.
 
     Postconditions:
+        - Returned text contains no HTML named or numeric entity
+          references (``&quot;``, ``&#039;``, etc.).
         - Returned text does not start with a recognized DDGS date
           prefix.
         - Returned text contains no markdown formatting characters.
         - Does not mutate the input.
     """
-    cleaned = _DATE_PREFIX_RE.sub("", body, count=1)
+    cleaned = html.unescape(body)
+    cleaned = _DATE_PREFIX_RE.sub("", cleaned, count=1)
     cleaned = strip_markdown(cleaned)
     return cleaned.strip()
 
@@ -386,15 +407,18 @@ def _title_restates_claim(claim_tokens: set[str], title: str) -> bool:
     return (len(intersection) / len(union)) >= _TITLE_CLAIM_OVERLAP_DROP
 
 
-def _relevance_filter(query: str, snippets: list[str]) -> list[str]:
+def _relevance_filter(
+    query: str, snippets: list[EvidenceSnippet],
+) -> list[EvidenceSnippet]:
     """Drop snippets that look tangential to the query.
 
     Uses MiniLM sentence embeddings to compute cosine similarity
-    between the claim and each snippet, keeping only those within
-    ``_RELEVANCE_BAND`` of the top-scoring snippet. The filter is
-    conservative: it never drops below ``_RELEVANCE_MIN_KEEP_FRAC``
-    of the input, and when ≤2 snippets are provided it passes them
-    through unchanged (too little signal to filter reliably).
+    between the claim and each snippet's text body, keeping only
+    those within ``_RELEVANCE_BAND`` of the top-scoring snippet. The
+    filter is conservative: it never drops below
+    ``_RELEVANCE_MIN_KEEP_FRAC`` of the input, and when ≤2 snippets
+    are provided it passes them through unchanged (too little signal
+    to filter reliably).
 
     Args:
         query: The claim text.
@@ -402,10 +426,11 @@ def _relevance_filter(query: str, snippets: list[str]) -> list[str]:
 
     Returns:
         A filtered list of snippets, in the same order as the input.
+        Each kept snippet retains its source URL.
 
     Preconditions:
         - ``query`` is a non-empty string.
-        - Each snippet is a non-empty string.
+        - Each snippet has non-empty ``text``.
 
     Postconditions:
         - Returned list preserves input order.
@@ -416,7 +441,8 @@ def _relevance_filter(query: str, snippets: list[str]) -> list[str]:
     """
     if len(snippets) <= 2:
         return snippets
-    embeds = embed([query] + snippets)
+    texts = [s.text for s in snippets]
+    embeds = embed([query] + texts)
     claim_emb = embeds[0:1]
     snippet_embs = embeds[1:]
     sims = (snippet_embs @ claim_emb.T).squeeze(-1).tolist()
@@ -426,8 +452,8 @@ def _relevance_filter(query: str, snippets: list[str]) -> list[str]:
     min_keep = max(int(len(snippets) * _RELEVANCE_MIN_KEEP_FRAC), 1)
     if len(kept) < min_keep:
         ranked = sorted(zip(snippets, sims), key=lambda x: -x[1])
-        kept_set = {s for s, _ in ranked[:min_keep]}
-        kept = [s for s in snippets if s in kept_set]
+        kept_texts = {s.text for s, _ in ranked[:min_keep]}
+        kept = [s for s in snippets if s.text in kept_texts]
     return kept
 
 
@@ -436,7 +462,7 @@ def get_search_snippets(
     num_results: int = 3,
     timeout: int = 5,
     backend: str = DEFAULT_BACKENDS,
-) -> list[str]:
+) -> list[EvidenceSnippet]:
     """Retrieve evidence snippets across every configured backend.
 
     Spins up one thread per backend, each running an independent
@@ -457,10 +483,15 @@ def get_search_snippets(
     directly because DDGS's Wikipedia adapter is title-prefix-only
     and returns empty for most full-sentence claims.
 
-    The query is passed through verbatim — no ``"fact check"``
-    prefix (biased Google toward Snopes-style rebuttals rather than
-    primary sources) and no date suffix (hurt evergreen claims by
-    dragging rankings toward "what's happening today" content).
+    On the DDGS path the query is suffixed with the subtractive
+    content operators in ``_SUBTRACTIVE_QUERY_TERMS`` (``-satire``,
+    ``-parody``, ``-humor``, ``-joke``) so the backend's query parser
+    drops obvious satire/parody pages before ranking. No positive
+    directive is added — a ``"fact check"`` prefix biased Google
+    toward Snopes-style rebuttals rather than primary sources, and a
+    date suffix hurt evergreen claims by dragging rankings toward
+    "what's happening today" content. Wikipedia REST does not honor
+    query operators, so the original ``query`` is sent verbatim there.
 
     Args:
         query: A search query string — typically a claim sentence
@@ -483,9 +514,12 @@ def get_search_snippets(
             names are routed through DDGS.
 
     Returns:
-        A list of unique non-empty snippet strings aggregated across
-        every backend that returned successfully. Empty list when no
-        backend produced any results.
+        A list of unique non-empty ``EvidenceSnippet`` objects
+        aggregated across every backend that returned successfully.
+        Each carries the composed text body and the source URL the
+        snippet came from (empty string when the backend did not
+        provide one). Empty list when no backend produced any
+        results.
 
     Preconditions:
         - ``query`` is a non-empty string.
@@ -493,8 +527,9 @@ def get_search_snippets(
         - A network connection is available.
 
     Postconditions:
-        - Returned snippets are stripped of leading/trailing whitespace.
-        - Returned snippets are deduplicated by exact content.
+        - Returned snippet texts are stripped of leading/trailing
+          whitespace.
+        - Returned snippets are deduplicated by exact text content.
         - Returns ``[]`` only when every backend failed or returned
           no usable bodies.
         - Does not mutate any external state.
@@ -509,19 +544,21 @@ def get_search_snippets(
     def _compose(title: str, body: str) -> str:
         """Compose title + relevance-anchored body window into one snippet.
 
-        Strips search-result noise (date prefixes, markdown markers)
-        from the body, drops the title when it near-restates the
-        claim (see ``_TITLE_CLAIM_OVERLAP_DROP``), and reserves the
-        title's char budget at the front of the cap. The body itself
-        gets smart-windowed via ``_smart_window`` so the most claim-
-        relevant sentences land inside the cap rather than always the
-        first ``_MAX_SNIPPET_CHARS`` chars — search-engine bodies
-        regularly run 300–400 chars and the conclusion of fact-check
-        articles often sits past the cap when truncation is top-down.
+        Strips search-result noise (HTML entities, date prefixes,
+        markdown markers) from both fields, drops the title when it
+        near-restates the claim (see ``_TITLE_CLAIM_OVERLAP_DROP``),
+        and reserves the title's char budget at the front of the cap.
+        The body itself gets smart-windowed via ``_smart_window`` so
+        the most claim-relevant sentences land inside the cap rather
+        than always the first ``_MAX_SNIPPET_CHARS`` chars —
+        search-engine bodies regularly run 300–400 chars and the
+        conclusion of fact-check articles often sits past the cap
+        when truncation is top-down.
 
         When the title alone would already exceed the cap (degenerate
         case), falls back to word-boundary truncation on the title.
         """
+        title = html.unescape(title).strip()
         body = _clean_body(body)
         title_keep = (
             title
@@ -537,31 +574,41 @@ def get_search_snippets(
         windowed_body = _smart_window(query, body, body_budget)
         return prefix + windowed_body
 
-    def _search_ddgs(single_backend: str) -> list[str]:
-        """Run a DDGS search against one backend and extract title+body."""
+    def _search_ddgs(single_backend: str) -> list[EvidenceSnippet]:
+        """Run a DDGS search against one backend and extract title+body+url.
+
+        Appends ``_SUBTRACTIVE_QUERY_TERMS`` so the backend's query
+        parser drops pages tagged as satire / parody / humor / joke
+        before ranking — observed live where defconnews-style satire
+        outranked legitimate sources on sparse-evidence claims and
+        lexically entailed the claim into a false positive.
+        """
         try:
             results = DDGS(timeout=timeout).text(
-                query,
+                f"{query} {_SUBTRACTIVE_QUERY_TERMS}",
                 max_results=num_results,
                 backend=single_backend,
             )
         except Exception:
             return []
-        snippets: list[str] = []
+        snippets: list[EvidenceSnippet] = []
         for result in results[:num_results]:
             title = result.get("title", "").strip()
             body = result.get("body", "").strip()
+            href = (result.get("href") or result.get("link") or "").strip()
             if not body:
                 continue
-            snippets.append(_compose(title, body))
+            snippets.append(EvidenceSnippet(text=_compose(title, body), url=href))
         return snippets
 
-    def _search_wikipedia() -> list[str]:
-        """Query MediaWiki REST search/page and extract title+excerpt.
+    def _search_wikipedia() -> list[EvidenceSnippet]:
+        """Query MediaWiki REST search/page and extract title+excerpt+url.
 
         Falls back to the page ``description`` when ``excerpt`` is
         missing so we still contribute a snippet for pages where the
-        query-term highlight produced no excerpt.
+        query-term highlight produced no excerpt. The page URL is
+        synthesized from the page key — MediaWiki REST does not
+        return canonical URLs in search responses.
         """
         params = urllib.parse.urlencode({"q": query, "limit": num_results})
         url = f"{_WIKIPEDIA_REST_URL}?{params}"
@@ -573,7 +620,7 @@ def get_search_snippets(
             return []
         except Exception:
             return []
-        snippets: list[str] = []
+        snippets: list[EvidenceSnippet] = []
         for page in data.get("pages", [])[:num_results]:
             title = (page.get("title") or "").strip()
             excerpt = _HTML_TAG_RE.sub("", (page.get("excerpt") or "")).strip()
@@ -581,21 +628,25 @@ def get_search_snippets(
             body = excerpt or description
             if not body:
                 continue
-            snippets.append(_compose(title, body))
+            key = (page.get("key") or "").strip()
+            page_url = f"https://en.wikipedia.org/wiki/{key}" if key else ""
+            snippets.append(
+                EvidenceSnippet(text=_compose(title, body), url=page_url),
+            )
         return snippets
 
-    def _search_one(b: str) -> list[str]:
+    def _search_one(b: str) -> list[EvidenceSnippet]:
         if b == "wikipedia":
             return _search_wikipedia()
         return _search_ddgs(b)
 
-    snippets: list[str] = []
+    snippets: list[EvidenceSnippet] = []
     seen: set[str] = set()
     with ThreadPoolExecutor(max_workers=len(backends)) as pool:
         for per_backend_snippets in pool.map(_search_one, backends):
-            for body in per_backend_snippets:
-                if body not in seen:
-                    seen.add(body)
-                    snippets.append(body)
+            for snippet in per_backend_snippets:
+                if snippet.text not in seen:
+                    seen.add(snippet.text)
+                    snippets.append(snippet)
 
     return _relevance_filter(query, snippets)

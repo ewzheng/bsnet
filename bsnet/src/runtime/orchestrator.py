@@ -30,13 +30,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 from bsnet.src.runtime.pipeline import Pipeline
 from bsnet.src.utils.buffer import DEFAULT_CONTEXT_SENTENCES, TranscriptBuffer
-from bsnet.src.utils.outputs import CheckResult, Claim, Verdict
+from bsnet.src.utils.outputs import CheckResult, Claim, EvidenceSnippet, Verdict
 
-SearchFn = Callable[[str], list[str]]
+SearchFn = Callable[[str], list[EvidenceSnippet] | list[str]]
 ValidateFn = Callable[[CheckResult], bool]
 
 
-def _default_search(query: str) -> list[str]:
+def _default_search(query: str) -> list[EvidenceSnippet]:
     """Placeholder search callable used until a real backend is wired up.
 
     Returns a single stub snippet so downstream stages have something
@@ -61,7 +61,7 @@ def _default_search(query: str) -> list[str]:
     query = query.strip()
     if not query:
         return []
-    return [f"placeholder evidence for query: {query}"]
+    return [EvidenceSnippet(text=f"placeholder evidence for query: {query}", url="")]
 
 
 def _default_validate(result: CheckResult) -> bool:
@@ -429,9 +429,13 @@ class Orchestrator:
     def _iter_output(self) -> Iterator[Verdict]:
         """Yield verdicts until the render-stage sentinel arrives.
 
-        Blocks on ``queue.get()`` so slow producers do not spin the
-        consumer. When the sentinel is received the generator
-        re-raises any captured stage exception or returns cleanly.
+        Polls ``queue.get`` with a short timeout instead of an
+        unbounded block so a ``KeyboardInterrupt`` on the main thread
+        can actually interrupt the consumer — on Windows, Python only
+        delivers SIGINT to the main thread, and a thread parked in an
+        unbounded ``Condition.wait`` does not always wake on signal
+        delivery. The timeout cycle keeps the consumer responsive
+        without busy-waiting.
 
         Returns:
             A generator of ``Verdict`` objects.
@@ -451,7 +455,10 @@ class Orchestrator:
             - If ``self._error`` was set, it has been re-raised.
         """
         while True:
-            item = self._verdict_q.get()
+            try:
+                item = self._verdict_q.get(timeout=0.25)
+            except queue.Empty:
+                continue
             if item is self._SENTINEL:
                 if self._error is not None:
                     raise self._error

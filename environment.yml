@@ -19,3 +19,4 @@ dependencies:
       - torchaudio
       - bitsandbytes
       - accelerate
+      - pyaudio
