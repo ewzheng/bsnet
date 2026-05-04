@@ -1,4 +1,4 @@
-# bsnet
+# BSNet
 
 Real-time fact-checking for live speech. Transcribes microphone audio, extracts
 factual claims as they're spoken, searches the web for evidence, and prints a
@@ -22,7 +22,7 @@ You can create the runtime environment with conda or venv:
 
 ```bash
 conda env create -f environment.yml
-conda activate bsnet
+conda activate BSNet
 ```
 
 ```bash
@@ -46,7 +46,7 @@ audio hardware.
 Launch the live CLI:
 
 ```bash
-python -m bsnet
+python -m BSNet
 ```
 
 The process starts listening, transcribes speech, and prints each verdict
@@ -66,7 +66,7 @@ To drive the pipeline from a non-audio source (tests, scripted inputs),
 import `main` and pass an iterable of transcript-chunk strings:
 
 ```python
-from bsnet.__main__ import main
+from BSNet.__main__ import main
 main(iter(["The unemployment rate dropped to 3.4% in January 2023."]))
 ```
 
@@ -88,11 +88,11 @@ Environment variables override the auto-detect defaults:
 
 | Variable | Effect |
 |---|---|
-| `BSNET_GPU_LAYERS` | Number of GGUF layers to offload to GPU. Unset (default) auto-offloads all layers on a GPU-enabled `llama-cpp-python` build, or stays on CPU otherwise. Set explicitly: `-1` offloads everything, `0` forces CPU, positive integer offloads that many layers (partial offload for low VRAM). |
-| `BSNET_QUANTIZE_SCORER` | Scorer DeBERTa quantization. Unset (default) auto-resolves to bnb int8 on CUDA / CPU and fp32 on ROCm. Set explicitly: `0` / `false` / `no` forces fp32, `1` / `true` / `yes` forces int8. |
+| `BSNet_GPU_LAYERS` | Number of GGUF layers to offload to GPU. Unset (default) auto-offloads all layers on a GPU-enabled `llama-cpp-python` build, or stays on CPU otherwise. Set explicitly: `-1` offloads everything, `0` forces CPU, positive integer offloads that many layers (partial offload for low VRAM). |
+| `BSNet_QUANTIZE_SCORER` | Scorer DeBERTa quantization. Unset (default) auto-resolves to bnb int8 on CUDA / CPU and fp32 on ROCm. Set explicitly: `0` / `false` / `no` forces fp32, `1` / `true` / `yes` forces int8. |
 | `KMP_DUPLICATE_LIB_OK` | Set to `TRUE` on Windows if multiple OpenMP runtimes collide at startup (common with torch + llama-cpp). |
 
-Transcription defaults (`bsnet/src/utils/transcription.py`): whisper size
+Transcription defaults (`BSNet/src/utils/transcription.py`): whisper size
 `base`, device `cpu`, compute type `int8`, VAD aggressiveness `2`. Edit
 those constants to swap the model or target a GPU.
 
@@ -153,18 +153,18 @@ ablation to quantify the size-vs-latency tradeoff.
 
 The shared task winners use 70B-class language models for the
 veracity step plus multi-stage retrieve-decompose-reason pipelines
-that run in batch mode. The bsnet pipeline targets real-time
+that run in batch mode. The BSNet pipeline targets real-time
 consumer hardware with veracity models two orders of magnitude
 smaller, so the comparison is across operating regimes rather than
 within the leaderboard.
 
 | System | Score | Notes |
 |---|---|---|
-| TUDA_MAI (#1) | 0.63 AVeriTeC | GPT-4o multi-stage |
-| HerO / HUMANE (#2) | 0.752 dev acc / 0.57 AVeriTeC | Llama-3.1-70B veracity |
-| Papelo (#5) | 0.48 AVeriTeC | T5 + GPT-4o multi-hop |
-| **bsnet (this work)** | **0.416 dev acc / 0.288 macro F1** | DeBERTa-v3-base NLI (184M) + Qwen3.5-0.8B, single-pass, real-time |
-| Provided baseline | 0.11 AVeriTeC | BLOOM-7B + BM25 + pretrained BERT |
+| TUDA_MAI (#1) | 0.724 dev acc / 0.630 AVeriTeC | GPT-4o multi-stage |
+| HerO / HUMANE (#2) | 0.752 dev acc / 0.570 AVeriTeC | Llama-3.1-70B veracity (standalone acc) |
+| Papelo (#5) | 0.754 dev acc / 0.480 AVeriTeC | T5 + GPT-4o multi-hop |
+| **BSNet (this work)** | **0.416 dev acc** / **0.288 Macro F1**| DeBERTa-v3-base NLI (184M) + Qwen3.5-0.8B, non-iterative, real-time |
+| Provided baseline | 0.110 AVeriTeC / 0.230 Macro F1 | BLOOM-7B + BM25 + pretrained BERT |
 
 The official AVeriTeC score combines verdict correctness with
 retrieved-evidence METEOR similarity to gold question-answer pairs.
@@ -202,7 +202,7 @@ Test layout:
 ## Repository layout
 
 ```
-bsnet/
+BSNet/
   __main__.py          CLI entry point
   src/
     model/             extractor, scorer, renderer, shared model helpers
