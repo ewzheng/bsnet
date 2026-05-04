@@ -22,7 +22,7 @@ You can create the runtime environment with conda or venv:
 
 ```bash
 conda env create -f environment.yml
-conda activate BSNet
+conda activate bsnet
 ```
 
 ```bash
@@ -46,7 +46,7 @@ audio hardware.
 Launch the live CLI:
 
 ```bash
-python -m BSNet
+python -m bsnet
 ```
 
 The process starts listening, transcribes speech, and prints each verdict
@@ -66,7 +66,7 @@ To drive the pipeline from a non-audio source (tests, scripted inputs),
 import `main` and pass an iterable of transcript-chunk strings:
 
 ```python
-from BSNet.__main__ import main
+from bsnet.__main__ import main
 main(iter(["The unemployment rate dropped to 3.4% in January 2023."]))
 ```
 
@@ -88,11 +88,12 @@ Environment variables override the auto-detect defaults:
 
 | Variable | Effect |
 |---|---|
-| `BSNet_GPU_LAYERS` | Number of GGUF layers to offload to GPU. Unset (default) auto-offloads all layers on a GPU-enabled `llama-cpp-python` build, or stays on CPU otherwise. Set explicitly: `-1` offloads everything, `0` forces CPU, positive integer offloads that many layers (partial offload for low VRAM). |
-| `BSNet_QUANTIZE_SCORER` | Scorer DeBERTa quantization. Unset (default) auto-resolves to bnb int8 on CUDA / CPU and fp32 on ROCm. Set explicitly: `0` / `false` / `no` forces fp32, `1` / `true` / `yes` forces int8. |
+| `BSNET_GPU_LAYERS` | Number of GGUF layers to offload to GPU. Unset (default) auto-offloads all layers on a GPU-enabled `llama-cpp-python` build, or stays on CPU otherwise. Set explicitly: `-1` offloads everything, `0` forces CPU, positive integer offloads that many layers (partial offload for low VRAM). |
+| `BSNET_QUANTIZE_SCORER` | Scorer DeBERTa quantization. Unset (default) auto-resolves to bnb int8 on CUDA / CPU and fp32 on ROCm. Set explicitly: `0` / `false` / `no` forces fp32, `1` / `true` / `yes` forces int8. |
+| `BSNET_DEBUG_TRANSCRIPTION` | Set to `1` / `true` / `yes` / `on` to surface per-utterance running-count and chunk-emission debug lines (`[ NN chars] ...`, `── chunk ──` blocks) from `bsnet/src/utils/transcription.py`. Default off — the live CLI stays clean and only verdicts print. |
 | `KMP_DUPLICATE_LIB_OK` | Set to `TRUE` on Windows if multiple OpenMP runtimes collide at startup (common with torch + llama-cpp). |
 
-Transcription defaults (`BSNet/src/utils/transcription.py`): whisper size
+Transcription defaults (`bsnet/src/utils/transcription.py`): whisper size
 `base`, device `cpu`, compute type `int8`, VAD aggressiveness `2`. Edit
 those constants to swap the model or target a GPU.
 
@@ -163,9 +164,9 @@ within the leaderboard.
 | TUDA_MAI (#1) | 0.724 dev acc / 0.630 AVeriTeC | GPT-4o multi-stage |
 | HerO / HUMANE (#2) | 0.752 dev acc / 0.570 AVeriTeC | Llama-3.1-70B veracity (standalone acc) |
 | Papelo (#5) | 0.754 dev acc / 0.480 AVeriTeC | T5 + GPT-4o multi-hop |
-| **BSNet (this work)** | **0.416 dev acc** / **0.288 Macro F1**| DeBERTa-v3-base NLI (184M) + Qwen3.5-0.8B, non-iterative, real-time |
+| **BSNet (this work)** | **0.416 dev acc / 0.288 Macro F1** | DeBERTa-v3-base NLI (184M) + Qwen3.5-0.8B, single-pass, real-time |
 | Provided baseline | 0.110 AVeriTeC / 0.230 Macro F1 | BLOOM-7B + BM25 + pretrained BERT |
-| Uniform Random | 0.250 dev acc / 0.207 Macro F1 | Performance of a model that predicts randomly | 
+| Uniform Random | 0.250 dev acc / 0.207 Macro F1 | Performance of a model that predicts randomly |
 | Majority Class | 0.610 dev acc / 0.190 Macro F1 | Performance of a model that only predicts 'refuted' |
 
 The official AVeriTeC score combines verdict correctness with
@@ -204,7 +205,7 @@ Test layout:
 ## Repository layout
 
 ```
-BSNet/
+bsnet/
   __main__.py          CLI entry point
   src/
     model/             extractor, scorer, renderer, shared model helpers

@@ -24,19 +24,33 @@ is exercisable end-to-end while those branches are in flight.
 """
 
 import queue
+import re
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 from bsnet.src.runtime.pipeline import Pipeline
 from bsnet.src.utils.buffer import DEFAULT_CONTEXT_SENTENCES, TranscriptBuffer
-from bsnet.src.utils.outputs import CheckResult, Claim, Verdict
+from bsnet.src.utils.outputs import CheckResult, Claim, EvidenceSnippet, Verdict
 
-SearchFn = Callable[[str], list[str]]
+# Normalizer for the session-wide claim dedup set. Matches the
+# extractor's context-leak filter: lowercase, drop punctuation,
+# collapse whitespace. Keeps two slightly differently punctuated
+# restatements of the same claim from each consuming a slot in the
+# pipeline.
+_DEDUP_PUNCT_RE = re.compile(r"[^\w\s]")
+_DEDUP_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_claim(text: str) -> str:
+    """Return a casing- and punctuation-stripped form of a claim."""
+    return _DEDUP_WS_RE.sub(" ", _DEDUP_PUNCT_RE.sub(" ", text.lower())).strip()
+
+SearchFn = Callable[[str], list[EvidenceSnippet] | list[str]]
 ValidateFn = Callable[[CheckResult], bool]
 
 
-def _default_search(query: str) -> list[str]:
+def _default_search(query: str) -> list[EvidenceSnippet]:
     """Placeholder search callable used until a real backend is wired up.
 
     Returns a single stub snippet so downstream stages have something
@@ -61,7 +75,7 @@ def _default_search(query: str) -> list[str]:
     query = query.strip()
     if not query:
         return []
-    return [f"placeholder evidence for query: {query}"]
+    return [EvidenceSnippet(text=f"placeholder evidence for query: {query}", url="")]
 
 
 def _default_validate(result: CheckResult) -> bool:
@@ -168,6 +182,14 @@ class Orchestrator:
         self._error_lock: threading.Lock = threading.Lock()
         self._error: BaseException | None = None
 
+        # Session-wide dedup set so a claim re-emitted on a later
+        # sentence (because the extractor leaked it back from the
+        # context, or the speaker simply restated the same fact) does
+        # not consume another search slot or surface a second verdict.
+        # The extract stage is single-worker so the set is touched on
+        # one thread only — no lock needed.
+        self._seen_claims: set[str] = set()
+
     def run(self, chunk_source: Iterable[str]) -> Iterator[Verdict]:
         """Start every stage and return an iterator over verdicts.
 
@@ -269,6 +291,10 @@ class Orchestrator:
                     break
                 context, sentence = item
                 for claim in self._pipeline.extract(sentence, context=context):
+                    key = _normalize_claim(claim.text)
+                    if not key or key in self._seen_claims:
+                        continue
+                    self._seen_claims.add(key)
                     self._claim_q.put(claim)
         except BaseException as exc:
             self._record_error(exc)
@@ -429,9 +455,13 @@ class Orchestrator:
     def _iter_output(self) -> Iterator[Verdict]:
         """Yield verdicts until the render-stage sentinel arrives.
 
-        Blocks on ``queue.get()`` so slow producers do not spin the
-        consumer. When the sentinel is received the generator
-        re-raises any captured stage exception or returns cleanly.
+        Polls ``queue.get`` with a short timeout instead of an
+        unbounded block so a ``KeyboardInterrupt`` on the main thread
+        can actually interrupt the consumer — on Windows, Python only
+        delivers SIGINT to the main thread, and a thread parked in an
+        unbounded ``Condition.wait`` does not always wake on signal
+        delivery. The timeout cycle keeps the consumer responsive
+        without busy-waiting.
 
         Returns:
             A generator of ``Verdict`` objects.
@@ -451,7 +481,10 @@ class Orchestrator:
             - If ``self._error`` was set, it has been re-raised.
         """
         while True:
-            item = self._verdict_q.get()
+            try:
+                item = self._verdict_q.get(timeout=0.25)
+            except queue.Empty:
+                continue
             if item is self._SENTINEL:
                 if self._error is not None:
                     raise self._error

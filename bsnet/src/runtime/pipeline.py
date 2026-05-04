@@ -7,10 +7,17 @@ or other logic between them.
 """
 
 from bsnet.src.model._common import STRONG_SIGNAL, WEAK_SIGNAL, label_claim
+from bsnet.src.model.embedder import get_embedder
 from bsnet.src.model.extractor import Extractor
 from bsnet.src.model.renderer import Renderer
 from bsnet.src.model.scorer import Scorer
-from bsnet.src.utils.outputs import CheckResult, Claim, ScoredClaim, Verdict
+from bsnet.src.utils.outputs import (
+    CheckResult,
+    Claim,
+    EvidenceSnippet,
+    ScoredClaim,
+    Verdict,
+)
 
 
 class Pipeline:
@@ -30,15 +37,27 @@ class Pipeline:
     def __init__(self) -> None:
         """Load all pipeline models.
 
+        Eagerly loads the search-side MiniLM embedder too — it
+        normally lazy-loads on the first claim's relevance-filter
+        call, which slips a ~1s weight-load into the first verdict's
+        latency. Pulling it forward here matches the rest of the
+        pipeline's load-once-at-startup posture.
+
         Preconditions:
             - Model weights are available (downloaded or cached).
 
         Postconditions:
-            - Extractor, scorer, and renderer are loaded and ready.
+            - Extractor, scorer, renderer, and embedder are loaded
+              and ready.
         """
+        print("Loading extractor (Qwen3.5-0.8B GGUF) …")
         self._extractor = Extractor()
+        print("Loading scorer (DeBERTa-v3-base-mnli-fever-anli) …")
         self._scorer = Scorer()
+        print("Loading renderer (Qwen3.5-0.8B GGUF) …")
         self._renderer = Renderer()
+        print("Loading embedder (MiniLM-L6-v2) …")
+        get_embedder()
 
     def extract(self, sentence: str, context: str = "") -> list[Claim]:
         """Extract checkable claims from a transcript sentence.
@@ -65,8 +84,18 @@ class Pipeline:
         """
         return self._extractor.extract(sentence, context=context)
 
-    def check(self, claim: str, snippets: list[str]) -> CheckResult:
+    def check(
+        self,
+        claim: str,
+        snippets: list[str] | list[EvidenceSnippet],
+    ) -> CheckResult:
         """Score a claim against search results and assign a label.
+
+        Accepts either bare strings (legacy / test-fixture path) or
+        ``EvidenceSnippet`` objects carrying the source URL alongside
+        the body. URLs ride through to ``EvidenceScore.url`` so the
+        renderer can surface citations; string inputs leave the URL
+        empty.
 
         Always returns a ``CheckResult`` so downstream stages can
         surface dropped cases instead of silently discarding them.
@@ -83,7 +112,10 @@ class Pipeline:
 
         Args:
             claim: The factual claim text to verify.
-            snippets: Evidence snippets from the search API.
+            snippets: Evidence snippets from the search API. Either a
+                list of plain text strings or a list of
+                ``EvidenceSnippet`` (text + url) — the two are not
+                mixed.
 
         Returns:
             A ``CheckResult`` whose ``label`` reflects either a
@@ -96,8 +128,17 @@ class Pipeline:
             - ``label`` is one of the factual verdict strings or
               ``"no-evidence"``.
             - For ``"no-evidence"`` labels, ``scored.scores`` is empty.
+            - When inputs are ``EvidenceSnippet``, each
+              ``EvidenceScore.url`` matches its source snippet's URL.
         """
-        scored = self._scorer.score(claim, snippets)
+        if snippets and isinstance(snippets[0], EvidenceSnippet):
+            texts = [s.text for s in snippets]
+            urls = [s.url for s in snippets]
+        else:
+            texts = list(snippets)
+            urls = [""] * len(snippets)
+
+        scored = self._scorer.score(claim, texts)
         if scored is None:
             return CheckResult(
                 claim=claim,
@@ -105,6 +146,9 @@ class Pipeline:
                 evidence="",
                 scored=ScoredClaim(claim=claim, scores=[]),
             )
+
+        for es, url in zip(scored.scores, urls):
+            es.url = url
 
         label, best_snippet = label_claim(scored.scores)
 
@@ -160,13 +204,48 @@ class Pipeline:
             result.claim, result.label, result.evidence,
         )
         summary = self._summarize_evidence(result.scored)
+        citations = self._format_citations(result.scored)
+
+        body = f"{explanation}\n-----\n{summary}"
+        if citations:
+            body = f"{body}\n{citations}"
 
         return Verdict(
             claim=result.claim,
             label=result.label,
             evidence=result.evidence,
-            explanation=f"{explanation}\n-----\n{summary}",
+            explanation=body,
         )
+
+    def _format_citations(self, scored: ScoredClaim) -> str:
+        """Build a numbered citations block from snippet URLs.
+
+        Walks ``scored.scores`` in order and emits one ``[i] url``
+        line per snippet that has a non-empty URL. Returns an empty
+        string when no snippet carries a URL — typical for the legacy
+        string-input path or the placeholder default search — so the
+        verdict body stays unchanged for those callers.
+
+        Args:
+            scored: The per-snippet NLI scores carried on the
+                ``CheckResult``.
+
+        Returns:
+            A multi-line string like ``"[1] https://...\\n[2] ..."``
+            or an empty string when no URLs are present.
+
+        Preconditions:
+            - ``scored.scores`` is a list of ``EvidenceScore`` values.
+
+        Postconditions:
+            - Returned string has no trailing newline.
+            - Does not mutate ``scored``.
+        """
+        lines: list[str] = []
+        for i, s in enumerate(scored.scores, 1):
+            if s.url:
+                lines.append(f"[{i}] {s.url}")
+        return "\n".join(lines)
 
     def _summarize_evidence(self, scored: ScoredClaim) -> str:
         """Count how each evidence snippet contributed to the label.

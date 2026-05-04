@@ -182,7 +182,7 @@ def _evaluate_row(
         sub_traces.append({
             "extracted_claim": sub.text,
             "snippet_count": len(snippets),
-            "snippets": list(snippets),
+            "snippets": [{"text": s.text, "url": s.url} for s in snippets],
             "scores": [
                 {
                     "snippet": s.snippet,
