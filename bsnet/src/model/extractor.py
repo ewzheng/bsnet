@@ -30,6 +30,25 @@ def _normalize(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", _NORMALIZE_RE.sub(" ", text.lower())).strip()
 
 
+# Matches lines that look like a JSON / dict key-value pair —
+# ``"key": value`` or ``"key": "value"`` — possibly wrapped in
+# braces or trailing commas. Qwen-0.8B occasionally interprets the
+# extractor prompt as a request for structured output and emits
+# claims in this shape; they are never real facts about the world.
+_JSON_KV_RE = re.compile(r'^\s*[\{\[]?\s*["\']\w[\w\s]*["\']\s*:\s*')
+
+# Editorial-label prefixes the model occasionally tacks onto an
+# extracted fact (``"Fact: …"``, ``"Claim - …"``). Stripping them
+# lets the orchestrator's session-wide dedup recognize the cleaned
+# claim as identical to a previously-seen unprefixed restatement —
+# without this strip, ``"The speed of light is …"`` and ``"Fact: The
+# speed of light is …"`` normalize to different keys and both run
+# through search.
+_LABEL_PREFIX_RE = re.compile(
+    r"^(?:fact|claim|statement|assertion)\s*[:\-]\s*", re.IGNORECASE,
+)
+
+
 # First-person intent / meta-utterance prefixes. Live transcription
 # routinely picks up speaker stage directions ("I'm going to put it
 # on the screen", "let me show you", "I'll explain") that the LLM
@@ -179,12 +198,14 @@ class Extractor:
                 "directions about the conversation itself (\"I'm going "
                 "to X\", \"I'll show you\", \"let me explain\", \"let's "
                 "look at\"). Do not write fragments or bare numbers. "
+                "Output plain sentences only — no JSON, no key/value "
+                "pairs, no quotation marks around the sentences. "
                 "Say \"none\" if there are no checkable facts.\n\n"
                 f"Context: {context}\n"
                 f"Latest: {text}\n"
                 "Facts:\n"
-                "{fact1}\n"
-                "{fact2}"
+                "[fact1]\n"
+                "[fact2]"
             )
         else:
             prompt = (
@@ -204,11 +225,13 @@ class Extractor:
                 "directions about the conversation itself (\"I'm going "
                 "to X\", \"I'll show you\", \"let me explain\", \"let's "
                 "look at\"). Do not write fragments or bare numbers. "
+                "Output plain sentences only — no JSON, no key/value "
+                "pairs, no quotation marks around the sentences. "
                 "Say \"none\" if there are no checkable facts.\n\n"
                 f"Text: {text}\n"
                 "Facts:\n"
-                "{fact1}\n"
-                "{fact2}"
+                "[fact1]\n"
+                "[fact2]"
             )
         raw_claims = generate_llm(
             self._model,
@@ -235,11 +258,20 @@ class Extractor:
         claims: list[Claim] = []
         for claim_text in body.splitlines():
             claim_text = claim_text.strip().lstrip("0123456789.-) ")
+            claim_text = _LABEL_PREFIX_RE.sub("", claim_text, count=1)
             if not claim_text or claim_text.lower() == "none":
                 continue
-            if claim_text.lower() in ("facts:", "{fact1}", "{fact2}"):
+            if claim_text.lower() in (
+                "facts:",
+                "[fact1]",
+                "[fact2]",
+                "{fact1}",
+                "{fact2}",
+            ):
                 continue
             if _is_first_person_intent(claim_text):
+                continue
+            if _JSON_KV_RE.match(claim_text):
                 continue
             if norm_context and _normalize(claim_text) in norm_context:
                 continue

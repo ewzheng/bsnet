@@ -24,6 +24,7 @@ is exercisable end-to-end while those branches are in flight.
 """
 
 import queue
+import re
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,19 @@ from concurrent.futures import ThreadPoolExecutor
 from bsnet.src.runtime.pipeline import Pipeline
 from bsnet.src.utils.buffer import DEFAULT_CONTEXT_SENTENCES, TranscriptBuffer
 from bsnet.src.utils.outputs import CheckResult, Claim, EvidenceSnippet, Verdict
+
+# Normalizer for the session-wide claim dedup set. Matches the
+# extractor's context-leak filter: lowercase, drop punctuation,
+# collapse whitespace. Keeps two slightly differently punctuated
+# restatements of the same claim from each consuming a slot in the
+# pipeline.
+_DEDUP_PUNCT_RE = re.compile(r"[^\w\s]")
+_DEDUP_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_claim(text: str) -> str:
+    """Return a casing- and punctuation-stripped form of a claim."""
+    return _DEDUP_WS_RE.sub(" ", _DEDUP_PUNCT_RE.sub(" ", text.lower())).strip()
 
 SearchFn = Callable[[str], list[EvidenceSnippet] | list[str]]
 ValidateFn = Callable[[CheckResult], bool]
@@ -168,6 +182,14 @@ class Orchestrator:
         self._error_lock: threading.Lock = threading.Lock()
         self._error: BaseException | None = None
 
+        # Session-wide dedup set so a claim re-emitted on a later
+        # sentence (because the extractor leaked it back from the
+        # context, or the speaker simply restated the same fact) does
+        # not consume another search slot or surface a second verdict.
+        # The extract stage is single-worker so the set is touched on
+        # one thread only — no lock needed.
+        self._seen_claims: set[str] = set()
+
     def run(self, chunk_source: Iterable[str]) -> Iterator[Verdict]:
         """Start every stage and return an iterator over verdicts.
 
@@ -269,6 +291,10 @@ class Orchestrator:
                     break
                 context, sentence = item
                 for claim in self._pipeline.extract(sentence, context=context):
+                    key = _normalize_claim(claim.text)
+                    if not key or key in self._seen_claims:
+                        continue
+                    self._seen_claims.add(key)
                     self._claim_q.put(claim)
         except BaseException as exc:
             self._record_error(exc)

@@ -18,6 +18,26 @@ import pyaudio
 import webrtcvad
 from faster_whisper import WhisperModel
 
+
+def _debug_enabled() -> bool:
+    """Resolve whether per-utterance / per-chunk debug printing is on.
+
+    Reads ``BSNET_DEBUG_TRANSCRIPTION`` at call time (not import time)
+    so toggling the env var in the same process takes effect without
+    a re-import. Truthy values: ``1``, ``true``, ``yes``, ``on`` —
+    case-insensitive. Anything else (unset, ``0``, ``false``) is off.
+
+    Returns:
+        ``True`` when the env var is set to a recognized truthy value.
+
+    Postconditions:
+        - Returns ``False`` when the env var is unset or empty.
+        - Match is case-insensitive.
+    """
+    return os.environ.get("BSNET_DEBUG_TRANSCRIPTION", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
 # Sentence boundary used to chunk transcription output for the
 # repetition collapser. Matches the same family of terminators
 # Whisper inserts when it punctuates speech.
@@ -171,11 +191,13 @@ def listen():
                             continue
 
                         accumulated += (" " if accumulated else "") + text
-                        print(f"[{len(accumulated):>4} chars] {text}")
+                        if _debug_enabled():
+                            print(f"[{len(accumulated):>4} chars] {text}")
 
                         if len(accumulated) >= 100:
                             chunk = accumulated.strip()
-                            print(f"\n── chunk ──\n{chunk}\n───────────\n")
+                            if _debug_enabled():
+                                print(f"\n── chunk ──\n{chunk}\n───────────\n")
                             yield chunk
                             accumulated = ""
 
@@ -183,7 +205,8 @@ def listen():
                     idle_silence += 1
                     if idle_silence >= IDLE_FLUSH_FRAMES:
                         chunk = accumulated.strip()
-                        print(f"\n── chunk ──\n{chunk}\n───────────\n")
+                        if _debug_enabled():
+                            print(f"\n── chunk ──\n{chunk}\n───────────\n")
                         yield chunk
                         accumulated  = ""
                         idle_silence = 0

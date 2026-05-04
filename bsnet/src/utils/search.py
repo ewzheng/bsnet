@@ -66,6 +66,70 @@ DEFAULT_BACKENDS = "google,duckduckgo,wikipedia"
 # only on the DDGS path.
 _SUBTRACTIVE_QUERY_TERMS = "-satire -parody -humor -joke"
 
+# Hostnames whose pages have no useful text body for the NLI scorer.
+# Video platforms surface in DDGS text-search results because their
+# pages have indexed metadata, but the snippet body is the video's
+# description / channel byline — not factual prose. NLI on those
+# strings is effectively pattern-matching the title against the claim
+# (whoever uploaded "Trump is gay - YMCA reaction" gets entailment
+# signal from the title alone). Drop them at the snippet aggregation
+# stage so the relevance filter and downstream scorer never see them.
+# Match is suffix-based so subdomains (``m.youtube.com``,
+# ``www.youtube.com``) are caught by their registrable parent.
+_BLOCKED_HOSTS = frozenset({
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "vimeo.com",
+    "twitch.tv",
+    "dailymotion.com",
+})
+
+
+def _is_blocked_host(url: str) -> bool:
+    """Decide whether ``url`` belongs to a host on the no-body-text list.
+
+    Parses the URL, normalizes the hostname (lowercase, strip a
+    leading ``www.``), and matches by suffix against
+    ``_BLOCKED_HOSTS`` so any subdomain (``m.youtube.com``,
+    ``music.youtube.com``) is caught by its registrable parent.
+
+    Args:
+        url: The candidate snippet URL. May be empty (Wikipedia REST
+            results sometimes have no canonical URL).
+
+    Returns:
+        ``True`` when the URL parses to a hostname that exactly
+        matches or ends in ``.<blocked>`` for some entry of
+        ``_BLOCKED_HOSTS``.
+
+    Preconditions:
+        - ``url`` is a string.
+
+    Postconditions:
+        - Returns ``False`` for empty / unparseable URLs (the
+          aggregation layer should not drop snippets that lack a
+          URL just because we can't classify them).
+        - Match is case-insensitive on the hostname component.
+        - Does not mutate the input.
+    """
+    if not url:
+        return False
+    try:
+        host = urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    host = host.lower().lstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return False
+    for blocked in _BLOCKED_HOSTS:
+        if host == blocked or host.endswith("." + blocked):
+            return True
+    return False
+
+
 # MediaWiki REST search endpoint. Full-text search returning page
 # title, short description, and a contextual excerpt. See
 # https://www.mediawiki.org/wiki/API:REST_API/Reference
@@ -530,6 +594,9 @@ def get_search_snippets(
         - Returned snippet texts are stripped of leading/trailing
           whitespace.
         - Returned snippets are deduplicated by exact text content.
+        - Returned snippets exclude any URL whose hostname matches
+          ``_BLOCKED_HOSTS`` (video platforms whose page bodies are
+          metadata, not factual prose).
         - Returns ``[]`` only when every backend failed or returned
           no usable bodies.
         - Does not mutate any external state.
@@ -645,6 +712,8 @@ def get_search_snippets(
     with ThreadPoolExecutor(max_workers=len(backends)) as pool:
         for per_backend_snippets in pool.map(_search_one, backends):
             for snippet in per_backend_snippets:
+                if _is_blocked_host(snippet.url):
+                    continue
                 if snippet.text not in seen:
                     seen.add(snippet.text)
                     snippets.append(snippet)

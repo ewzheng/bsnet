@@ -84,6 +84,7 @@ Environment variables override the auto-detect defaults:
 |---|---|
 | `BSNET_GPU_LAYERS` | Number of GGUF layers to offload to GPU. Unset (default) auto-offloads all layers on a GPU-enabled `llama-cpp-python` build, or stays on CPU otherwise. Set explicitly: `-1` offloads everything, `0` forces CPU, positive integer offloads that many layers (partial offload for low VRAM). |
 | `BSNET_QUANTIZE_SCORER` | Scorer DeBERTa quantization. Unset (default) auto-resolves to bnb int8 on CUDA / CPU and fp32 on ROCm. Set explicitly: `0` / `false` / `no` forces fp32, `1` / `true` / `yes` forces int8. |
+| `BSNET_DEBUG_TRANSCRIPTION` | Set to `1` / `true` / `yes` / `on` to surface per-utterance running-count and chunk-emission debug lines (`[ NN chars] ...`, `── chunk ──` blocks) from `bsnet/src/utils/transcription.py`. Default off — the live CLI stays clean and only verdicts print. |
 | `KMP_DUPLICATE_LIB_OK` | Set to `TRUE` on Windows if multiple OpenMP runtimes collide at startup (common with torch + llama-cpp). |
 
 Transcription defaults (`bsnet/src/utils/transcription.py`): whisper size
