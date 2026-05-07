@@ -19,13 +19,33 @@ class Claim:
 
 
 @dataclass
+class EvidenceSnippet:
+    """An evidence text body with the source URL it came from.
+
+    Produced by ``get_search_snippets``. The ``text`` field is what
+    the NLI scorer reads; ``url`` rides along untouched until the
+    renderer cites it. Defaulting ``url`` to empty string keeps test
+    fixtures that only care about text concise.
+    """
+
+    text: str
+    url: str = ""
+
+
+@dataclass
 class EvidenceScore:
-    """NLI scores for a single (claim, snippet) pair."""
+    """NLI scores for a single (claim, snippet) pair.
+
+    ``url`` is populated by ``Pipeline.check`` when the input snippets
+    carry source URLs; defaults to empty for string-only callers and
+    test fixtures that don't supply one.
+    """
 
     snippet: str
     support: float
     contradict: float
     neutral: float
+    url: str = ""
 
 
 @dataclass

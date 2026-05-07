@@ -104,9 +104,16 @@ def main(chunk_source: Iterable[str] | None = None) -> int:
         search_fn=search_fn,
         validate_fn=Validator().evaluate_check_result,
     )
-    for verdict in orch.run(chunk_source):
-        print(_format_verdict(verdict))
-        print()
+    try:
+        for verdict in orch.run(chunk_source):
+            print(_format_verdict(verdict))
+            print()
+    except KeyboardInterrupt:
+        # Stage threads are daemons and die with the process; no need
+        # to drain queues. Just print a clean exit line so Ctrl+C
+        # doesn't leave a stack trace on the user's terminal.
+        print("\nStopped.")
+        return 130
     return 0
 
 

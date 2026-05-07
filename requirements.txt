@@ -12,3 +12,4 @@ torchaudio
 bitsandbytes
 accelerate
 datasets
+pyaudio
