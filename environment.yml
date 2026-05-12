@@ -3,10 +3,10 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python>=3.11
-  - numpy
+  - python=3.12
   - pip
   - pip:
+      - numpy
       - transformers
       - llama-cpp-python
       - faster-whisper
@@ -19,4 +19,5 @@ dependencies:
       - torchaudio
       - bitsandbytes
       - accelerate
+      - datasets
       - pyaudio
