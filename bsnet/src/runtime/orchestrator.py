@@ -82,7 +82,7 @@ def _default_validate(result: CheckResult) -> bool:
     """Pass-through default for ``validate_fn``.
 
     Accepts every ``CheckResult`` unchanged. The CLI entry point
-    (``bsnet.src.__main__``) injects the real
+    (``bsnet.__main__``) injects the real
     ``Validator.evaluate_check_result`` so the orchestrator stays
     decoupled from the validation module; this default keeps tests
     that don't care about gating wiring-free.

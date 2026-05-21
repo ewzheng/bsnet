@@ -8,13 +8,14 @@ no-op and exists to keep the smoke test independent of audio hardware
 and model weights.
 """
 
+from __future__ import annotations
+
 import sys
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
-from bsnet.src.runtime.orchestrator import Orchestrator
-from bsnet.src.utils.outputs import Verdict
-from bsnet.src.utils.search import get_search_snippets as search_fn
-from bsnet.src.validation.validator import Validator
+if TYPE_CHECKING:
+    from bsnet.src.utils.outputs import Verdict
 
 _LABEL_EMOJI: dict[str, str] = {
     "true": "✔️",
@@ -90,6 +91,10 @@ def main(chunk_source: Iterable[str] | None = None) -> int:
     """
     if chunk_source is None:
         return 0
+
+    from bsnet.src.runtime.orchestrator import Orchestrator
+    from bsnet.src.utils.search import get_search_snippets as search_fn
+    from bsnet.src.validation.validator import Validator
 
     # Windows terminals default to cp1252 which cannot encode emoji.
     # Force UTF-8 on stdout and degrade unknown glyphs to "?" instead

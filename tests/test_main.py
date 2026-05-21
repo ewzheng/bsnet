@@ -1,6 +1,6 @@
 """Smoke tests for the bsnet command-line entry point."""
 
-from bsnet.src.__main__ import main
+from bsnet.__main__ import main
 
 
 def test_main_returns_success_exit_code() -> None:
