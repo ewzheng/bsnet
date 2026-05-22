@@ -10,6 +10,7 @@ import os
 import re
 
 import torch
+from huggingface_hub import hf_hub_download
 from llama_cpp import Llama, llama_supports_gpu_offload
 from transformers import (
     AutoModelForCausalLM,
@@ -21,9 +22,11 @@ from transformers import (
 # ── Default model identifiers ────────────────────────────────────────────────
 EXTRACTOR_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 EXTRACTOR_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
+EXTRACTOR_MODEL_REVISION = "6f447fc6494c4b0f7dc269f8c39da6c61555a0de"
 SCORER_MODEL = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
 RENDERER_MODEL = "bartowski/Qwen_Qwen3.5-0.8B-GGUF"
 RENDERER_GGUF_FILE = "Qwen_Qwen3.5-0.8B-Q4_K_M.gguf"
+RENDERER_MODEL_REVISION = EXTRACTOR_MODEL_REVISION
 
 # ── Sampling parameters ──────────────────────────────────────────────────────
 # Two profiles: thinking mode (lower presence penalty, lets the model
@@ -207,6 +210,7 @@ def load_llm(
     repo: str,
     gguf_file: str,
     n_ctx: int = 2048,
+    revision: str | None = None,
 ) -> Llama:
     """Load a GGUF model via llama-cpp-python.
 
@@ -225,6 +229,8 @@ def load_llm(
         repo: HuggingFace repo ID containing the GGUF file.
         gguf_file: Name of the GGUF file within the repo.
         n_ctx: Context window size in tokens.
+        revision: Optional immutable Hugging Face revision (commit
+            hash). ``None`` follows the repo's default branch.
 
     Returns:
         A ``Llama`` instance ready for inference.
@@ -241,15 +247,21 @@ def load_llm(
         - When ``BSNET_GPU_LAYERS`` is set, that exact value is used
           regardless of build support; an ignored offload on a
           CPU-only build is a no-op handled by llama-cpp itself.
+        - When ``revision`` is provided, the resolved GGUF file comes
+          from that exact Hugging Face snapshot.
     """
     raw = os.environ.get("BSNET_GPU_LAYERS")
     if raw is not None:
         n_gpu_layers = int(raw)
     else:
         n_gpu_layers = -1 if llama_supports_gpu_offload() else 0
-    return Llama.from_pretrained(
-        repo,
+    model_path = hf_hub_download(
+        repo_id=repo,
         filename=gguf_file,
+        revision=revision,
+    )
+    return Llama(
+        model_path=model_path,
         n_ctx=n_ctx,
         n_gpu_layers=n_gpu_layers,
         verbose=False,

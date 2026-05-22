@@ -30,9 +30,8 @@ Key dependencies: `torch` (CPU), `transformers`, `accelerate`,
 ```
 bsnet/
   __init__.py
+  __main__.py            CLI entry point
   src/
-    __init__.py
-    __main__.py            CLI entry point
     model/
       _common.py           shared loaders, device resolution, label_claim
       extractor.py         Qwen-based claim extractor

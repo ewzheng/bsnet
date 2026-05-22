@@ -1,5 +1,6 @@
 numpy
 transformers
+huggingface_hub
 llama-cpp-python
 faster-whisper
 sentencepiece

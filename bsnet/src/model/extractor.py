@@ -11,6 +11,7 @@ import re
 from bsnet.src.model._common import (
     EXTRACTOR_MODEL,
     EXTRACTOR_GGUF_FILE,
+    EXTRACTOR_MODEL_REVISION,
     generate_llm,
     load_llm,
 )
@@ -135,7 +136,12 @@ class Extractor:
         Postconditions:
             - The model is loaded and ready for inference.
         """
-        self._model = load_llm(repo, gguf_file, n_ctx=n_ctx)
+        self._model = load_llm(
+            repo,
+            gguf_file,
+            n_ctx=n_ctx,
+            revision=EXTRACTOR_MODEL_REVISION,
+        )
 
     def extract(self, text: str, context: str = "") -> list[Claim]:
         """Run single-pass claim extraction on an input string.
