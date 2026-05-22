@@ -24,6 +24,7 @@ dependencies = [
     "bitsandbytes",
     "accelerate",
     "datasets",
+    "pyaudio",
 ]
 
 [project.scripts]
